@@ -1,0 +1,548 @@
+from collections import deque
+from datetime import datetime
+from java.lang import String, Throwable, System as JavaSystem
+from java.util import Locale
+from java import dynamic_proxy
+from android.graphics import Color
+from android.view import MotionEvent
+import re
+import plugins_manager
+
+from base_plugin import BasePlugin, MenuItemData, MenuItemType, MethodHook
+from android_utils import run_on_ui_thread, log
+from ui.bulletin import BulletinHelper
+from ui.settings import Header, Switch, Divider, Input, Selector, Text
+from hook_utils import find_class
+
+__id__ = "log_overlay"
+__name__ = "Log Overlay"
+__description__ = "Compact log viewer with draggable overlay and plugin filtering"
+__version__ = "2.0.0"
+__author__ = "@koshbko & fork by @mihailkotovski"
+__min_version__ = "11.9.0"
+__icon__ = "Developer/8"
+
+class LogOverlayPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.is_overlay_visible = False
+        self.log_view = None
+        self.window_manager = None
+        self.log_buffer = deque(maxlen=100)  
+        
+        self.offset_x = 0
+        self.offset_y = 0
+        self.initial_x = 0
+        self.initial_y = 0
+        self.initial_touch_x = 0
+        self.initial_touch_y = 0
+
+        self.last_tap_time = 0
+        self.double_tap_threshold = 500
+        
+        self.strings = {
+            "toggle_overlay": "Toggle log overlay",
+            "overlay_shown": "Log overlay enabled",
+            "overlay_hidden": "Log overlay disabled",
+            "error": "Error: {}",
+            "plugin_loaded": "Log Overlay loaded",
+            "creating_overlay": "Creating overlay...",
+            "overlay_created": "Overlay created",
+            "overlay_removed": "Overlay removed",
+            "starting_logcat": "Starting logcat...",
+            "no_app_context": "No app context",
+            "no_window_manager": "No WindowManager",
+            "ui_thread_error": "UI thread error: {}",
+            "drag_hint": "Drag to move • Filter: {}",
+            "app_utils_class_not_found": "AppUtils class not found",
+            "log_internal_method_not_found": "logInternal method not found",
+            "hook_failed": "Hook failed",
+            "filter_all": "All",
+            "filter_active": "Active",
+            "filter_disabled": "Disabled"
+        }
+
+    def _get_available_plugins_info(self):
+        try:
+            all_plugins = []
+            enabled_plugins = []
+            disabled_plugins = []
+
+            for plugin in plugins_manager.PluginsManager._plugins.values():
+                plugin_info = f"{plugin.id}"
+                all_plugins.append(plugin_info)
+                if plugin.enabled:
+                    enabled_plugins.append(plugin_info)
+                else:
+                    disabled_plugins.append(plugin_info)
+
+            total_count = len(all_plugins)
+            enabled_count = len(enabled_plugins)
+            disabled_count = len(disabled_plugins)
+
+            summary = f"Total: {total_count} plugins ({enabled_count} enabled, {disabled_count} disabled)"
+
+            if enabled_plugins:
+                examples = ", ".join(enabled_plugins[:8])
+                if len(enabled_plugins) > 8:
+                    examples += f" and {len(enabled_plugins) - 8} more"
+                summary += f"\nEnabled: {examples}"
+
+            return summary
+
+        except Exception as e:
+            log(f"[{__id__}] Error getting plugins info: {e}")
+            return "Error loading plugins list"
+
+    def _show_all_plugins_dialog(self, view):
+        try:
+            all_plugins = []
+            for plugin in plugins_manager.PluginsManager._plugins.values():
+                status = "✓" if plugin.enabled else "✗"
+                all_plugins.append(f"{status} {plugin.name} ({plugin.id})")
+
+            if not all_plugins:
+                plugins_text = "No plugins found"
+            else:
+                plugins_text = "\n".join(sorted(all_plugins))
+
+            from ui.alert import AlertDialogBuilder
+            from client_utils import get_last_fragment
+
+            last_fragment = get_last_fragment()
+            if last_fragment and last_fragment.getParentActivity():
+                context = last_fragment.getParentActivity()
+                alert_builder = AlertDialogBuilder(context, AlertDialogBuilder.ALERT_TYPE_MESSAGE)
+                alert_builder.set_title("Available Plugins")
+                alert_builder.set_message(plugins_text)
+                alert_builder.set_positive_button("Close")
+                alert_builder.create()
+                alert_builder.show()
+            else:
+                BulletinHelper.show_info("Cannot show dialog - no context available")
+
+        except Exception as e:
+            log(f"[{__id__}] Error showing plugins dialog: {e}")
+            BulletinHelper.show_error(f"Error showing plugins: {str(e)}")
+
+    def create_settings(self):
+        try:
+            plugins_info = self._get_available_plugins_info()
+
+            settings = [
+                Header(text="Log Filtering Settings"),
+                Switch(
+                    key="enable_filtering",
+                    text="Enable Plugin Filtering",
+                    default=False,
+                    subtext="Filter logs by specific plugin IDs",
+                    icon="menu_intro_solar"
+                ),
+                Selector(
+                    key="filter_mode",
+                    text="Filter Mode",
+                    default=0,
+                    items=["Show All", "Show Only Selected", "Hide Selected"],
+                    icon="msg_select"
+                ),
+                Input(
+                    key="plugin_filter_list",
+                    text="Plugin IDs",
+                    default="",
+                    icon="msg_edit"
+                ),
+                Text(
+                    text="View All Available Plugins",
+                    icon="msg_info",
+                    accent=True,
+                    on_click=self._show_all_plugins_dialog
+                ),
+                Divider(text=plugins_info),
+                Header(text="Display Settings"),
+                Selector(
+                    key="max_logs_display",
+                    text="Max Logs in Overlay",
+                    default=1,
+                    items=["5", "10", "15", "20", "25"],
+                    icon="menu_select_quote_solar"
+                ),
+                Switch(
+                    key="show_timestamps",
+                    text="Show Timestamps",
+                    default=True,
+                    subtext="Display time in log entries",
+                    icon="msg_calendar"
+                ),
+                Switch(
+                    key="show_filter_status",
+                    text="Show Filter Status",
+                    default=True,
+                    subtext="Display current filter in overlay header",
+                    icon="msg_info"
+                )
+            ]
+            return settings
+        except Exception as e:
+            log(f"[{__id__}] Error creating settings: {e}")
+            return [Header(text="Settings Error")]
+
+    def on_plugin_load(self):
+        try:
+            self.add_menu_item(
+                MenuItemData(
+                    menu_type=MenuItemType.DRAWER_MENU,
+                    text=self.strings["toggle_overlay"],
+                    icon="msg_message",
+                    on_click=self.toggle_overlay
+                )
+            )
+
+            self.setup_log_hook()
+
+            log(f"[{__id__}] Plugin loaded successfully")
+        except Exception as e:
+            error_msg = self.strings["error"].format(str(e))
+            log(f"[{__id__}] {error_msg}")
+            BulletinHelper.show_error(error_msg)
+
+    def setup_log_hook(self):
+        AppUtils = find_class("com.exteragram.messenger.utils.AppUtils")
+        if not AppUtils:
+            error = self.strings["app_utils_class_not_found"]
+            self.log(error)
+            BulletinHelper.show_error(f'[Log Overlay] {error}')
+            return
+            
+        try:
+            IntegerType = find_class("java.lang.Integer").TYPE
+            method_to_hook = AppUtils.getClass().getDeclaredMethod(
+                "logInternal", 
+                String, 
+                Throwable, 
+                IntegerType
+            )
+            method_to_hook.setAccessible(True)
+        except Exception as e:
+            error = self.strings["log_internal_method_not_found"]
+            self.log(f'{error}: {e}')
+            BulletinHelper.show_error(f'[Log Overlay] {error}: {e}')
+            return
+        
+        handler_instance = self.LogOverlayHook(self)
+        unhook_obj = self.hook_method(method_to_hook, handler_instance, 10)
+        
+        if not unhook_obj:
+            error = self.strings["hook_failed"]
+            self.log(error)
+            BulletinHelper.show_error(f'[Log Overlay] {error}')
+
+    class LogOverlayHook(MethodHook):
+        def __init__(self, plugin):
+            self.plugin = plugin
+            
+        def before_hooked_method(self, param):
+            log_message = param.args[0]
+            self.plugin.add_log_entry(log_message)
+
+    def _extract_plugin_id_from_log(self, message: str):
+        try:
+            pattern = r'\[([^\]]+)\]'
+            matches = re.findall(pattern, message)
+            if matches:
+                return matches[0].strip()
+            return None
+        except Exception as e:
+            log(f"[{__id__}] Error extracting plugin ID: {e}")
+            return None
+
+    def _should_show_log(self, message: str):
+        try:
+            if not self.get_setting("enable_filtering", False):
+                return True
+
+            plugin_id = self._extract_plugin_id_from_log(message)
+            if not plugin_id:
+                filter_mode = self.get_setting("filter_mode", 0)
+                return filter_mode == 0
+
+            filter_list_str = self.get_setting("plugin_filter_list", "").strip()
+            if not filter_list_str:
+                filter_mode = self.get_setting("filter_mode", 0)
+                return filter_mode == 0
+
+            filter_list = [item.strip().lower() for item in filter_list_str.split(",") if item.strip()]
+            plugin_id_lower = plugin_id.lower()
+
+            is_in_filter = any(filter_id in plugin_id_lower or plugin_id_lower in filter_id for filter_id in filter_list)
+
+            filter_mode = self.get_setting("filter_mode", 0)
+            if filter_mode == 0:
+                return True
+            elif filter_mode == 1:
+                return is_in_filter
+            elif filter_mode == 2:
+                return not is_in_filter
+
+            return True
+        except Exception as e:
+            log(f"[{__id__}] Error in filter logic: {e}")
+            return True
+
+    def add_log_entry(self, message: str):
+        if not self._should_show_log(message):
+            return
+
+        if self.get_setting("show_timestamps", True):
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            formatted_message = f"[{timestamp}] {message}"
+        else:
+            formatted_message = message
+
+        self.log_buffer.append(formatted_message)
+
+        if self.is_overlay_visible:
+            run_on_ui_thread(self.update_log_view)
+
+    def toggle_overlay(self, context: dict = None):
+        try:
+            if self.is_overlay_visible:
+                self.hide_overlay()
+            else:
+                self.show_overlay()
+        except Exception as e:
+            error_msg = self.strings["error"].format(str(e))
+            log(f"[{__id__}] {error_msg}")
+            BulletinHelper.show_error(error_msg)
+
+    def show_overlay(self):
+        if self.is_overlay_visible:
+            return
+            
+        try:
+            run_on_ui_thread(self._show_overlay_ui)
+        except Exception as e:
+            error_msg = self.strings["error"].format(f"Show: {str(e)}")
+            log(f"[{__id__}] {error_msg}")
+            BulletinHelper.show_error(error_msg)
+
+    def _show_overlay_ui(self):
+        try:
+            from hook_utils import find_class
+            WindowManager = find_class("android.view.WindowManager")
+            LayoutParams = find_class("android.view.WindowManager$LayoutParams")
+            TextView = find_class("android.widget.TextView")
+            ApplicationLoader = find_class("org.telegram.messenger.ApplicationLoader")
+            Gravity = find_class("android.view.Gravity")
+            View = find_class("android.view.View")
+            
+            app_context = ApplicationLoader.applicationContext
+            if not app_context:
+                return
+                
+            self.window_manager = app_context.getSystemService("window")
+            if not self.window_manager:
+                return
+                
+            display = self.window_manager.getDefaultDisplay()
+            Point = find_class("android.graphics.Point")
+            size = Point()
+            display.getSize(size)
+            screen_width, screen_height = size.x, size.y
+            
+            params = LayoutParams()
+            params.width = int(screen_width * 0.8)
+            params.height = -2
+            params.x = int(screen_width * 0.1)
+            params.y = int(screen_height * 0.05)
+            
+            params.gravity = Gravity.TOP | Gravity.START
+            params.flags = (
+                LayoutParams.FLAG_NOT_FOCUSABLE |
+                LayoutParams.FLAG_LAYOUT_NO_LIMITS |
+                LayoutParams.FLAG_NOT_TOUCH_MODAL
+            )
+            params.format = 1
+            
+            Build_VERSION = find_class("android.os.Build$VERSION")
+            if Build_VERSION and Build_VERSION.SDK_INT >= 26:
+                params.type = LayoutParams.TYPE_APPLICATION_OVERLAY
+            else:
+                params.type = LayoutParams.TYPE_PHONE
+                
+            self.log_view = TextView(app_context)
+            initial_text = self._get_filter_status_text()
+            self.log_view.setText(initial_text)
+            self.log_view.setBackgroundColor(Color.argb(0xCC, 0x33, 0x33, 0x33))
+            self.log_view.setTextColor(Color.WHITE)
+            self.log_view.setTextSize(10)
+            from org.telegram.messenger import AndroidUtilities
+            self.log_view.setTypeface(AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_MONO))
+            self.log_view.setGravity(Gravity.LEFT | Gravity.BOTTOM)
+            self.log_view.setPadding(8, 8, 8, 8)
+            
+            class TouchListener(dynamic_proxy(View.OnTouchListener)):
+                def __init__(self, plugin):
+                    super().__init__()
+                    self.plugin = plugin
+                    self.is_dragging = False
+                    self.drag_threshold = 10
+
+                def onTouch(self, view, event):
+                    action = event.getAction()
+                    if action == MotionEvent.ACTION_DOWN:
+                        self.plugin.initial_x = self.plugin.log_view.getLayoutParams().x
+                        self.plugin.initial_y = self.plugin.log_view.getLayoutParams().y
+                        self.plugin.initial_touch_x = event.getRawX()
+                        self.plugin.initial_touch_y = event.getRawY()
+                        self.is_dragging = False
+                        return True
+                    elif action == MotionEvent.ACTION_MOVE:
+                        dx = event.getRawX() - self.plugin.initial_touch_x
+                        dy = event.getRawY() - self.plugin.initial_touch_y
+
+                        if abs(dx) > self.drag_threshold or abs(dy) > self.drag_threshold:
+                            self.is_dragging = True
+                            params = self.plugin.log_view.getLayoutParams()
+                            params.x = int(self.plugin.initial_x + dx)
+                            params.y = int(self.plugin.initial_y + dy)
+                            self.plugin.window_manager.updateViewLayout(self.plugin.log_view, params)
+                        return True
+                    elif action == MotionEvent.ACTION_UP:
+                        if not self.is_dragging:
+                            current_time = JavaSystem.currentTimeMillis()
+                            if current_time - self.plugin.last_tap_time < self.plugin.double_tap_threshold:
+                                self.plugin._toggle_filter_mode()
+                            self.plugin.last_tap_time = current_time
+                        return True
+                    return False
+                    
+            self.log_view.setOnTouchListener(TouchListener(self))
+            
+            self.window_manager.addView(self.log_view, params)
+            self.is_overlay_visible = True
+            self.update_log_view()
+            
+            BulletinHelper.show_success(self.strings["overlay_created"])
+            
+        except Exception as e:
+            error_msg = self.strings["error"].format(f"UI Show: {str(e)}")
+            log(f"[{__id__}] {error_msg}")
+            BulletinHelper.show_error(error_msg)
+
+    def hide_overlay(self):
+        if not self.is_overlay_visible:
+            return
+
+        try:
+            run_on_ui_thread(self._hide_overlay_ui)
+        except Exception as e:
+            error_msg = self.strings["error"].format(f"Hide: {str(e)}")
+            log(f"[{__id__}] {error_msg}")
+            BulletinHelper.show_error(error_msg)
+
+    def _hide_overlay_ui(self):
+        try:
+            if self.log_view and self.window_manager:
+                self.window_manager.removeView(self.log_view)
+                self.log_view = None
+                
+            self.is_overlay_visible = False
+            BulletinHelper.show_info(self.strings["overlay_removed"])
+        except Exception as e:
+            error_msg = self.strings["error"].format(f"UI Hide: {str(e)}")
+            log(f"[{__id__}] {error_msg}")
+            BulletinHelper.show_error(error_msg)
+
+    def _get_filter_status_text(self):
+        try:
+            if not self.get_setting("show_filter_status", True):
+                return self.strings["drag_hint"].format("Hidden")
+
+            if not self.get_setting("enable_filtering", False):
+                return self.strings["drag_hint"].format(self.strings["filter_all"])
+
+            filter_mode = self.get_setting("filter_mode", 0)
+            filter_list = self.get_setting("plugin_filter_list", "").strip()
+
+            if filter_mode == 0:
+                status = self.strings["filter_all"]
+            elif filter_mode == 1:
+                if filter_list:
+                    plugins = [p.strip() for p in filter_list.split(",") if p.strip()]
+                    status = f"Only: {', '.join(plugins[:2])}" + ("..." if len(plugins) > 2 else "")
+                else:
+                    status = "Only: None"
+            elif filter_mode == 2:
+                if filter_list:
+                    plugins = [p.strip() for p in filter_list.split(",") if p.strip()]
+                    status = f"Hide: {', '.join(plugins[:2])}" + ("..." if len(plugins) > 2 else "")
+                else:
+                    status = "Hide: None"
+            else:
+                status = "Unknown"
+
+            return self.strings["drag_hint"].format(status)
+        except Exception as e:
+            log(f"[{__id__}] Error getting filter status: {e}")
+            return self.strings["drag_hint"].format("Error")
+
+    def _toggle_filter_mode(self):
+        try:
+            if not self.get_setting("enable_filtering", False):
+                self.set_setting("enable_filtering", True)
+                self.set_setting("filter_mode", 1)
+                BulletinHelper.show_info("Filter enabled: Show Only Selected")
+            else:
+                current_mode = self.get_setting("filter_mode", 0)
+                if current_mode == 0:
+                    self.set_setting("filter_mode", 1)
+                    BulletinHelper.show_info("Filter: Show Only Selected")
+                elif current_mode == 1:
+                    self.set_setting("filter_mode", 2)
+                    BulletinHelper.show_info("Filter: Hide Selected")
+                elif current_mode == 2:
+                    self.set_setting("enable_filtering", False)
+                    self.set_setting("filter_mode", 0)
+                    BulletinHelper.show_info("Filter disabled: Show All")
+                else:
+                    self.set_setting("filter_mode", 0)
+                    BulletinHelper.show_info("Filter: Show All")
+
+            if self.is_overlay_visible:
+                run_on_ui_thread(self.update_log_view)
+
+        except Exception as e:
+            log(f"[{__id__}] Error toggling filter mode: {e}")
+            BulletinHelper.show_error(f"Filter toggle error: {str(e)}")
+
+    def update_log_view(self):
+        try:
+            if not self.log_view or not self.is_overlay_visible:
+                return
+
+            max_logs_setting = self.get_setting("max_logs_display", 1)
+            max_logs_map = {0: 5, 1: 10, 2: 15, 3: 20, 4: 25}
+            max_logs = max_logs_map.get(max_logs_setting, 10)
+
+            visible_logs = list(self.log_buffer)[-max_logs:]
+
+            if self.get_setting("show_filter_status", True):
+                filter_status = self._get_filter_status_text()
+                if visible_logs:
+                    display_text = filter_status + "\n" + "─" * 30 + "\n" + "\n".join(visible_logs)
+                else:
+                    display_text = filter_status + "\n" + "─" * 30 + "\nNo logs to display"
+            else:
+                display_text = "\n".join(visible_logs) if visible_logs else "No logs to display"
+
+            self.log_view.setText(display_text)
+        except Exception as e:
+            log(f"[{__id__}] Update error: {str(e)}")
+
+    def on_plugin_unload(self):
+        try:
+            if self.is_overlay_visible:
+                self.hide_overlay()
+            log(f"[{__id__}] Plugin unloaded")
+        except Exception as e:
+            log(f"[{__id__}] Unload error: {str(e)}")

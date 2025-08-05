@@ -1,0 +1,132 @@
+import sys
+import types
+__id__ = "neofetch"
+__name__ = "neofetch"
+__description__ = "neofetch ahh"
+__author__ = "hpdevfox"
+__min_version__ = "11.9.1"
+__icon__ = "tgads/0"
+__version__ = "1.0.3"
+
+# --- begin utils.ascii ---
+utils = types.ModuleType('utils')
+sys.modules['utils'] = utils
+ascii = types.ModuleType('utils.ascii')
+sys.modules['utils.ascii'] = ascii
+utils.ascii = ascii
+exec('class AsciiLibrary:\n    def getAscii(): #todo\n        return ["             ",\n" /| ､     ",\n"(°､ ｡ 7 ",\n" |､  ~ヽ",\n"じしf_,)"]\n', ascii.__dict__)
+# --- end utils.ascii ---
+
+# --- begin utils.settings ---
+utils = types.ModuleType('utils')
+sys.modules['utils'] = utils
+settings = types.ModuleType('utils.settings')
+sys.modules['utils.settings'] = settings
+utils.settings = settings
+exec('from ui.settings import Header, Switch, Divider\n\nclass NeoSettings:\n    def __init__(self):\n        print("settings spawn :<")\n    \n    def spawn(self):\n        return [\n            Header(text="Test NeoSettings"),\n            Input(\n                key="meow",\n                text="test meow",\n                default="meow",\n            )\n        ]\n', settings.__dict__)
+# --- end utils.settings ---
+
+# --- begin utils.math ---
+utils = types.ModuleType('utils')
+sys.modules['utils'] = utils
+math = types.ModuleType('utils.math')
+sys.modules['utils.math'] = math
+utils.math = math
+exec('import json, os, requests\n\nclass NeoMath:\n    def _merge_text_with_ascii(ascii, text):\n        padding = 4\n        output_lines = []\n        max_lines = max(len(ascii), len(text))\n        min_size = len(ascii[0])\n        for i in range(max_lines):\n            left = ascii[i] if i < len(ascii) else " " * min_size\n            right = text[i] if i < len(text) else ""\n            line = left + " " * padding + right\n            output_lines.append(line)\n\n        return "\\n".join(output_lines)\n\n    def _format_size(size_bytes):\n        if size_bytes < 0:\n            return "0 B"\n        elif size_bytes < 1024:\n            return f"{size_bytes} B"\n        elif size_bytes < 1024 * 1024:\n            return f"{size_bytes / 1024:.2f} KB"\n        elif size_bytes < 1024 * 1024 * 1024:\n            return f"{size_bytes / (1024 * 1024):.2f} MB" \n        else:\n            return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"\n', math.__dict__)
+# --- end utils.math ---
+
+# --- main.py ---
+
+#todo in builder :)
+NeoMath = math.NeoMath
+NeoSettings = settings.NeoSettings
+AsciiLibrary = ascii.AsciiLibrary
+
+import os
+import traceback
+import plugins_manager
+from android.os import Build, SystemClock
+from android.app import ActivityManager
+from android.net import NetworkCapabilities
+from android.content import Context, Intent, IntentFilter
+from java.lang import System as JavaSystem
+from java.util import Locale, ArrayList
+from org.telegram.messenger import SharedConfig, ApplicationLoader, UserConfig
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from android_utils import log
+from client_utils import get_user_config
+from org.telegram.tgnet import TLRPC
+
+class NeofetchPlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self.settings = NeoSettings()
+
+    def create_settings(self):
+        return self.settngs.spawn()
+
+    def on_send_message_hook(self, account, params):
+        if not isinstance(params.message, str) or not params.message.startswith(".neofetch"):
+                return HookResult()
+
+        try:
+            text = NeoMath._merge_text_with_ascii(AsciiLibrary.getAscii(), self._get_neofetch_text())
+            params.message = text
+
+            if not hasattr(params, "entities") or params.entities is None:
+                params.entities = ArrayList()
+
+            entity = TLRPC.TL_messageEntityBlockquote() 
+            entity.collapsed = True
+            entity.offset = 0
+            entity.length = int(len(text.encode(encoding='utf_16_le')) / 2)
+            params.entities.add(entity)
+        except Exception as e:
+            try:
+                error_msg = f"Error retrieving debug information: {str(e)}\n\n{traceback.format_exc()}"
+                params.message = error_msg
+            except:
+                params.message = "double crash"
+        return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+    def _get_neofetch_text(self):
+        try:
+            uptime_ms = SystemClock.elapsedRealtime()
+            uptime_seconds = int(uptime_ms / 1000)
+            days = uptime_seconds // 86400
+            hours = (uptime_seconds % 86400) // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            seconds = uptime_seconds % 60
+            uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+
+            active_plugins = [plugin for plugin in plugins_manager.PluginsManager._plugins.values() if plugin.enabled]
+            active_names = [plugin.name for plugin in active_plugins]
+
+            context = ApplicationLoader.applicationContext
+            activity_manager = context.getSystemService(Context.ACTIVITY_SERVICE)
+            mem_info = ActivityManager.MemoryInfo()
+            activity_manager.getMemoryInfo(mem_info)
+            total_mem = mem_info.totalMem / (1024 * 1024)
+            avail_mem = mem_info.availMem / (1024 * 1024)
+            used_mem = total_mem - avail_mem
+
+            current_account = UserConfig.selectedAccount
+            user_config = get_user_config()
+            user_id = user_config.getClientUserId()
+
+            context = ApplicationLoader.applicationContext
+            package_name = context.getPackageName()
+
+            return (
+                f"{user_id}@{package_name}",
+                "------------------------",
+                f"Device: {Build.MANUFACTURER} {Build.MODEL}",
+                f"Uptime: {uptime_str}",
+                f"OS: {Build.ID} (a{Build.VERSION.RELEASE})",
+                f"Build: {Build.VERSION.CODENAME}",
+                f"Plugins: {len(active_names)}",
+                f"CPU: {Build.SOC_MODEL}",
+                f"Memory: {int(used_mem)} MB / {int(total_mem)} MB"
+            )
+        except Exception as e:
+            return f"Error retrieving device info: {str(e)}\n"

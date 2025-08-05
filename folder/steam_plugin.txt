@@ -1,0 +1,1044 @@
+from ui.settings import Header, Input, Switch, Selector, Divider
+from base_plugin import BasePlugin, HookResult, HookStrategy
+import json
+import requests
+from java.util import Locale
+import traceback
+from markdown_utils import parse_markdown
+import time
+import threading
+from org.telegram.ui.ActionBar import AlertDialog
+from client_utils import send_message, get_last_fragment, get_send_messages_helper, get_messages_controller, get_user_config, send_request
+from android_utils import log
+from java.io import File
+from org.telegram.messenger import ApplicationLoader
+from org.telegram.tgnet.tl import TL_account
+from ui.bulletin import BulletinHelper
+import os
+import uuid
+from typing import Optional, Any
+
+__id__ = "steam"
+__name__ = "Steam"
+__version__ = "1.4.0"
+__description__ = "🎮 Показывает текущую игру в Steam\n\n📋 Команды:\n• [.nowsteam] — текущая игра\n• [.slibrary] — библиотека игр\n• [.sflibrary] — полная библиотека\n\n🎨 Design by @reNightly, @qmrrchh"
+__author__ = "@KangelPlugins & @MGEPlugins"
+__min_version__ = "11.9.0"
+__icon__ = "OMGKAWAIIANGELGOD/3"
+__load__ = True
+
+
+class Locales:
+    default = {
+        "settings_main_header": "⚙️ Basic Settings",
+        "settings_steam_id": "Steam ID",
+        "settings_steam_id_subtext": "Enter your Steam ID",
+        "settings_api_key": "Steam API Key",
+        "settings_api_key_subtext": "Get it at: https://steamcommunity.com/dev/apikey",
+        "settings_auto_update_header": "🎮 Profile Auto-Update",
+        "settings_enable_auto": "Enable auto-update",
+        "settings_enable_auto_subtext": "Automatically updates profile with game info",
+        "settings_check_interval": "Check interval (seconds)",
+        "settings_check_interval_subtext": "How often to check game status",
+        "settings_update_location": "Update location",
+        "settings_update_location_items": ["About", "Location (Premium)"],
+        "settings_text_template": "Text template",
+        "settings_text_template_subtext": "Use {game} for game name",
+        "settings_default_text": "Default text",
+        "settings_default_text_subtext": "Shown when no game is running",
+        "settings_sort_by_playtime": "Sort by playtime",
+        "settings_sort_by_playtime_subtext": "If disabled, sorts by last played date",
+        "settings_usage_divider": "Usage: .nowsteam",
+        "error_steam_id_not_set": "First set up your Steam ID in plugin settings!",
+        "error_api_key_not_set": "First set up your API key in plugin settings!",
+        "error_steam_id_not_found": "Steam ID not found or profile is hidden",
+        "error_invalid_api_key": "Invalid API key. Get a new key at https://steamcommunity.com/dev/apikey",
+        "error_network": "Network error! Check your internet connection",
+        "error_api": "Error: Invalid response from Steam API",
+        "error_unknown": "Error: {e}",
+        "searching": "Searching...",
+        "not_playing": "Not playing anything...",
+        "playing_format": "🎮 | Currently playing: {game}",
+        "developers": "👨‍💻 | **Developers:** {developers}",
+        "publishers": "🏢 | **Publishers:** {publishers}",
+        "metacritic": "⭐ | **Metacritic Score:** {score}/100",
+        "genres": "🏷 | **Genres:** {genres}",
+        "playtime": "⏱ | **Playtime:** {hours} hrs. {minutes} min.",
+        "playtime_minutes": "⏱ | **Playtime:** {minutes} min.",
+        "game_link": "🎮 | [Game Link]({url})",
+        "post_found_header": "🎮 *Game found!*\n\n",
+        "requested_tags_line": "🔍 *Requested tags:* `{tags}`\n\n",
+        "post_tags_line": "🏷️ *Tags in post:* `{tags}`\n\n",
+        "image_link_line": "🔗 *Link:* [Open image]({url})",
+    }
+    en = default
+    ru = {
+        "settings_main_header": "⚙️ Основные настройки",
+        "settings_steam_id": "Steam ID",
+        "settings_steam_id_subtext": "Введите ваш Steam ID",
+        "settings_api_key": "Steam API Key",
+        "settings_api_key_subtext": "Получить: https://steamcommunity.com/dev/apikey",
+        "settings_auto_update_header": "🎮 Автообновление профиля",
+        "settings_enable_auto": "Включить автообновление",
+        "settings_enable_auto_subtext": "Автоматически обновляет профиль информацией об игре",
+        "settings_check_interval": "Интервал проверки (секунды)",
+        "settings_check_interval_subtext": "Как часто проверять статус игры",
+        "settings_update_location": "Место обновления",
+        "settings_update_location_items": ["О себе", "Геолокация (Премиум)"],
+        "settings_text_template": "Шаблон текста",
+        "settings_text_template_subtext": "Используйте {game} для названия игры",
+        "settings_default_text": "Текст по умолчанию",
+        "settings_default_text_subtext": "Отображается, когда игра не запущена",
+        "settings_sort_by_playtime": "Сортировать по времени игры",
+        "settings_sort_by_playtime_subtext": "Если выключено, сортирует по дате последнего запуска",
+        "settings_usage_divider": "Использование: .nowsteam",
+        "error_steam_id_not_set": "Сначала настройте Steam ID в настройках плагина!",
+        "error_api_key_not_set": "Сначала настройте API ключ в настройках плагина!",
+        "error_steam_id_not_found": "Steam ID не найден или профиль скрыт",
+        "error_invalid_api_key": "Неверный API ключ. Получите новый ключ на https://steamcommunity.com/dev/apikey",
+        "error_network": "Ошибка сети! Проверьте подключение к интернету",
+        "error_api": "Ошибка: Неверный ответ от Steam API",
+        "error_unknown": "Ошибка: {e}",
+        "searching": "Ищем игру...",
+        "not_playing": "Сейчас не играю ни во что...",
+        "playing_format": "🎮 | Сейчас играю в: {game}",
+        "developers": "👨‍💻 | **Разработчики:** {developers}",
+        "publishers": "🏢 | **Издатели:** {publishers}",
+        "metacritic": "⭐ | **Оценка Metacritic:** {score}/100",
+        "genres": "🏷 | **Жанры:** {genres}",
+        "playtime": "⏱ | **Время в игре:** {hours} ч. {minutes} мин.",
+        "playtime_minutes": "⏱ | **Время в игре:** {minutes} мин.",
+        "game_link": "🎮 | [Ссылка на игру]({url})",
+        "post_found_header": "🎮 *Найдена игра!*\n\n",
+        "requested_tags_line": "🔍 *Запрошенные теги:* `{tags}`\n\n",
+        "post_tags_line": "🏷️ *Теги в посте:* `{tags}`\n\n",
+        "image_link_line": "🔗 *Ссылка:* [Открыть изображение]({url})",
+    }
+
+def localise(key: str, **kwargs) -> str:
+    lang = Locale.getDefault().getLanguage()
+    locale_dict = getattr(Locales, lang, Locales.default)
+    text = locale_dict.get(key, key)
+    return text.format(**kwargs) if kwargs else text
+
+TEMP_DIR_NAME = "temp_steam_images"
+DEFAULT_STREAM_STRING = localise("playing_format")
+DEFAULT_STREAM_TEXT = localise("not_playing")
+DEFAULT_CHECK_INTERVAL = 30  
+progress_dialog = None
+
+class SteamPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._temp_dir = None
+        self._streamer_thread = None
+        self._stop_streamer = False
+        threading.Thread(target=self._streamer, daemon=True).start()
+
+    def _streamer(self):
+        log("[Steam] Streamer started")
+        while not self._stop_streamer:
+            try:
+                if self.get_setting("update_bio", False):
+                    log("[Steam] Update bio is enabled")
+                    userFull = get_messages_controller().getUserFull(get_user_config().getClientUserId())
+                    if not userFull:
+                        log("[Steam] Failed to get userFull")
+                        time.sleep(5)
+                        continue
+
+                    stream_place = self.get_setting("stream_place", 1 if get_user_config().isPremium() else 0)
+                    max_len = 140 if get_user_config().isPremium() else 70
+
+                    steam_id = self.get_setting("steam_id", "")
+                    api_key = self.get_setting("api_key", "")
+                    
+                    if not steam_id:
+                        log("[Steam] Steam ID is not set")
+                        time.sleep(5)
+                        continue
+
+                    log(f"[Steam] Fetching game for user {steam_id}")
+                    result, _, _, _ = self.get_game(steam_id, api_key)
+                    log(f"[Steam] Got result from get_game: {result}")
+                    
+                    if result != self.get_setting("default_stream_text", DEFAULT_STREAM_TEXT) and result != 'Steam ID не найден...':
+                        log(f"[Steam] Found game: {result}")
+                        new_about_text = self.get_setting("track_display_format", DEFAULT_STREAM_STRING)
+                        log(f"[Steam] Original format: {new_about_text}")
+                        if isinstance(result, dict):
+                            log(f"[Steam] Result is a dict, using name: {result['name']}")
+                            new_about_text = new_about_text.replace("{game}", str(result['name']))
+                        else:
+                            log(f"[Steam] Result is a string: {result}")
+                            new_about_text = new_about_text.replace("{game}", str(result))
+                        log(f"[Steam] Final about text: {new_about_text}")
+                        
+                        if stream_place == 0:
+                            if userFull.about != new_about_text[:max_len]:
+                                try:
+                                    req = TL_account.updateProfile()
+                                    req.flags = 4
+                                    req.about = new_about_text[:max_len]
+                                    send_request(req, ())
+                                    log("[Steam] Successfully updated bio")
+                                except Exception as e:
+                                    log(f"[Steam] Error updating bio: {e}")
+                                    time.sleep(5)
+                        else:
+                            if not get_user_config().isPremium():
+                                log("[Steam] User is not premium, can't update business location")
+                                time.sleep(5)
+                                continue
+                            try:
+                                req = TL_account.updateBusinessLocation()
+                                req.address = new_about_text[:96]
+                                req.flags = 1
+                                send_request(req, ())
+                                log("[Steam] Successfully updated business location")
+                            except Exception as e:
+                                log(f"[Steam] Error updating business location: {e}")
+                                time.sleep(5)
+                    else:
+                        log("[Steam] No game found")
+                        default_bio = self.get_setting("default_stream_text", DEFAULT_STREAM_TEXT)
+                        if stream_place == 0:
+                            if userFull.about != default_bio[:max_len]:
+                                try:
+                                    req = TL_account.updateProfile()
+                                    req.flags = 4
+                                    req.about = default_bio[:max_len]
+                                    send_request(req, ())
+                                    log("[Steam] Set default bio")
+                                except Exception as e:
+                                    log(f"[Steam] Error setting default bio: {e}")
+                                    time.sleep(5)
+                        else:
+                            if not get_user_config().isPremium():
+                                log("[Steam] User is not premium, can't update business location")
+                                time.sleep(5)
+                                continue
+                            try:
+                                req = TL_account.updateBusinessLocation()
+                                req.address = default_bio[:96]
+                                req.flags = 1
+                                send_request(req, ())
+                                log("[Steam] Set default bio in business location")
+                            except Exception as e:
+                                log(f"[Steam] Error setting default bio in business location: {e}")
+                                time.sleep(5)
+
+                    check_interval = self.get_setting("check_interval", DEFAULT_CHECK_INTERVAL)
+                    time.sleep(check_interval)
+            except Exception as e:
+                log(f"[Steam] Streamer error: {e}")
+                time.sleep(10)
+
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self._temp_dir = self._get_temp_dir()
+        if self._temp_dir:
+            log("Steam plugin loaded successfully")
+            steam_id = self.get_setting("steam_id", "")
+            api_key = self.get_setting("api_key", "")
+            update_bio = self.get_setting("update_bio", False)
+            log(f"[Steam] Loaded settings - Steam ID: {steam_id}, API Key: {'*' * 8 + api_key[-4:] if api_key else 'Not set'}, Update Bio: {update_bio}")
+        else:
+            log("Failed to initialize temp directory for Steam")
+
+    def _get_temp_dir(self):
+        try:
+            base_dir = ApplicationLoader.getFilesDirFixed()
+            if not base_dir:
+                return None
+            temp_dir = File(base_dir, TEMP_DIR_NAME)
+            if not temp_dir.exists() and not temp_dir.mkdirs():
+                return None
+            return temp_dir
+        except Exception as e:
+            log(f"Error getting temp directory: {e}")
+            return None
+
+    def download_game_image(self, image_url):
+        if not image_url:
+            return None
+        temp_dir = self._get_temp_dir()
+        if not temp_dir or not temp_dir.isDirectory():
+            return None
+
+        filename = f"game_{uuid.uuid4()}.jpg"
+        temp_photo_path = File(temp_dir, filename).getAbsolutePath()
+
+        try:
+            head = requests.head(image_url, timeout=5)
+            content_length = int(head.headers.get('content-length', 0))
+            if content_length > 10 * 1024 * 1024:
+                return None
+
+            resp = requests.get(image_url, stream=True, timeout=10)
+            resp.raise_for_status()
+
+            with open(temp_photo_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            return temp_photo_path
+        except Exception as e:
+            try:
+                if os.path.exists(temp_photo_path):
+                    os.remove(temp_photo_path)
+            except Exception:
+                pass
+            return None
+
+    def delete_temp_file_async(self, file_path, delay_seconds=5):
+        def _delete():
+            try:
+                time.sleep(delay_seconds)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as e:
+                pass
+        threading.Thread(target=_delete, daemon=True).start()
+
+    def create_settings(self):
+        lang = Locale.getDefault().getLanguage()
+        update_bio = self.get_setting("update_bio", False)
+        
+        settings = [
+            Header(text=localise("settings_main_header")),
+            Input(
+                key="steam_id",
+                text=localise("settings_steam_id"),
+                subtext=localise("settings_steam_id_subtext"),
+                default="",
+                icon="filled_username"
+            ),
+            Input(
+                key="api_key",
+                text=localise("settings_api_key"),
+                subtext=localise("settings_api_key_subtext"),
+                default="",
+                icon="msg_secret"
+            ),
+            Divider(),
+            Header(text=localise("settings_auto_update_header")),
+            Switch(
+                key="update_bio",
+                text=localise("settings_enable_auto"),
+                default=False,
+                subtext=localise("settings_enable_auto_subtext"),
+                on_change=lambda new_value: self._show_stream_alert(new_value),
+                icon="ic_ab_search"
+            ),
+            Input(
+                key="check_interval",
+                text=localise("settings_check_interval"),
+                subtext=localise("settings_check_interval_subtext"),
+                default=str(DEFAULT_CHECK_INTERVAL),
+                icon="input_schedule"
+            ) if update_bio else None,
+            Selector(
+                key="stream_place",
+                text=localise("settings_update_location"),
+                default=1 if get_user_config().isPremium() else 0,
+                items=localise("settings_update_location_items"),
+                icon="menu_premium_location" if get_user_config().isPremium() else "msg_openprofile"
+            ) if update_bio and get_user_config().isPremium() else None,
+            Input(
+                key="track_display_format",
+                text=localise("settings_text_template"),
+                default=DEFAULT_STREAM_STRING,
+                subtext=localise("settings_text_template_subtext"),
+                icon="input_forward"
+            ) if update_bio else None,
+            Input(
+                key="default_stream_text",
+                text=localise("settings_default_text"),
+                default=DEFAULT_STREAM_TEXT,
+                subtext=localise("settings_default_text_subtext"),
+                icon="input_reply"
+            ) if update_bio else None,
+            Divider(),
+            Header(text="📚 Настройки библиотеки"),
+            Switch(
+                key="sort_by_playtime",
+                text=localise("settings_sort_by_playtime"),
+                default=True,
+                subtext=localise("settings_sort_by_playtime_subtext"),
+                icon="sort"
+            ),
+        ]
+        return [s for s in settings if s is not None]
+
+    def _show_stream_alert(self, value):
+        if value:
+            lang = Locale.getDefault().getLanguage()
+            if lang.startswith('ru'):
+                title = "⚠️⚠️ВНИМАНИЕ⚠️⚠️"
+                message = "Эта функция может работать нестабильно из-за ограничений Telegram на частую смену профиля. Ваши данные могут обновляться с задержкой. Используйте на свой страх и риск."
+            else:
+                title = "⚠️⚠️WARNING⚠️⚠️"
+                message = "This feature may work inconsistently due to Telegram's profile change limits. Your profile information may not update immediately. Use at your own risk."
+            fragment = get_last_fragment()
+            ctx = fragment.getContext() if fragment else ApplicationLoader.applicationContext
+            dialog = AlertDialog(ctx, 3)
+            dialog.setTitle(title)
+            dialog.setMessage(message)
+            dialog.setButton("OK", None)
+            dialog.show()
+
+    def get_game(self, id_steam, api_key):
+        if not api_key:
+            BulletinHelper.show_error("API ключ не указан")
+            return '❌ Ошибка: API ключ не указан', None, None, None
+            
+        if not id_steam or not id_steam.strip():
+            BulletinHelper.show_error("Steam ID не указан")
+            return '❌ Ошибка: Steam ID не указан', None, None, None
+            
+        if not id_steam.isdigit():
+            BulletinHelper.show_error("Steam ID должен содержать только цифры")
+            return '❌ Ошибка: Steam ID должен содержать только цифры', None, None, None
+            
+        link = 'http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002'
+        params = {
+            'key': api_key,
+            'steamids': id_steam,
+            'format': 'json'
+        }
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                log(f"[SteamPlugin] Отправляем запрос к Steam API (попытка {attempt + 1}/{max_retries})...")
+                r = requests.get(link, params=params, timeout=20)
+                
+                if r.status_code == 403:
+                    BulletinHelper.show_error("Неверный API ключ. Получите новый ключ на https://steamcommunity.com/dev/apikey")
+                    return '❌ Ошибка: Неверный API ключ', None, None, None
+                    
+                r.raise_for_status()
+                da = json.loads(r.text)
+                log(f"[SteamPlugin] Получен ответ от Steam API: {da}")
+                
+                if not da['response']['players']:
+                    log("[SteamPlugin] Steam ID не найден")
+                    return '❌ Ошибка: Steam ID не найден или профиль скрыт', None, None, None
+                    
+                player = da['response']['players'][0]
+                log(f"[SteamPlugin] Данные игрока: {player}")
+                
+                if 'gameextrainfo' not in player:
+                    log("[SteamPlugin] Игрок не в игре")
+                    return self.get_setting("default_stream_text", DEFAULT_STREAM_TEXT), None, None, None
+                    
+                game_name = player['gameextrainfo']
+                game_id = player.get('gameid')
+                log(f"[SteamPlugin] Название игры: {game_name}, ID игры: {game_id}")
+                
+                if not game_id:
+                    log("[SteamPlugin] ID игры не найден")
+                    return game_name, None, None, None
+                    
+                game_store_url = f"https://store.steampowered.com/app/{game_id}/"
+                
+                stats_link = f'http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/'
+                stats_params = {
+                    'key': api_key,
+                    'steamid': id_steam,
+                    'include_appinfo': 1,
+                    'include_played_free_games': 1,
+                    'format': 'json'
+                }
+                try:
+                    log("[SteamPlugin] Запрашиваем статистику игры...")
+                    stats_r = requests.get(stats_link, params=stats_params, timeout=10)
+                    stats_r.raise_for_status()
+                    stats_data = json.loads(stats_r.text)
+                    log(f"[SteamPlugin] Получена статистика: {stats_data}")
+                    
+                    playtime = 0  
+                    if 'response' in stats_data and 'games' in stats_data['response']:
+                        for game in stats_data['response']['games']:
+                            if str(game.get('appid')) == str(game_id):
+                                playtime = game.get('playtime_forever', 0)
+                                log(f"[SteamPlugin] Найдено время игры: {playtime} минут")
+                                break
+                except Exception as e:
+                    log(f"[SteamPlugin] Ошибка при получении времени игры: {e}")
+                    playtime = 0
+                    
+                game_link = 'http://store.steampowered.com/api/appdetails'
+                game_params = {
+                    'appids': game_id,
+                    'l': 'russian',
+                    'format': 'json'
+                }
+                try:
+                    log("[SteamPlugin] Запрашиваем детали игры...")
+                    game_r = requests.get(game_link, params=game_params, timeout=10)
+                    game_r.raise_for_status()
+                    game_data = json.loads(game_r.text)
+                    log(f"[SteamPlugin] Получены детали игры: {game_data}")
+                    
+                    if str(game_id) in game_data and game_data[str(game_id)]['success']:
+                        game_info = game_data[str(game_id)]['data']
+                        log(f"[SteamPlugin] Информация об игре: {game_info}")
+                        
+                        image_url = None
+                        if 'header_image' in game_info:
+                            image_url = game_info['header_image']
+                        elif 'background' in game_info:
+                            image_url = game_info['background']
+                        elif 'screenshots' in game_info and game_info['screenshots']:
+                            image_url = game_info['screenshots'][0]['path_full']
+                            
+                        metacritic_score = 'N/A'
+                        if 'metacritic' in game_info and isinstance(game_info['metacritic'], dict):
+                            metacritic_score = game_info['metacritic'].get('score', 'N/A')
+                        
+                        game_details = {
+                            'name': game_name,
+                            'developers': game_info.get('developers', []),
+                            'publishers': game_info.get('publishers', []),
+                            'metacritic': metacritic_score,
+                            'genres': [g['description'] for g in game_info.get('genres', [])],
+                            'categories': [c['description'] for c in game_info.get('categories', [])],
+                            'release_date': game_info.get('release_date', {}).get('date', 'N/A'),
+                            'short_description': game_info.get('short_description', ''),
+                            'playtime': playtime,
+                            'store_url': game_store_url
+                        }
+                        
+                        log(f"[SteamPlugin] Сформированы детали игры: {game_details}")
+                        return game_details, image_url, playtime, game_store_url
+                        
+                    log("[SteamPlugin] Не удалось получить детали игры")
+                    return game_name, None, playtime, game_store_url
+                    
+                except Exception as e:
+                    log(f"[SteamPlugin] Ошибка при получении информации об игре: {e}")
+                    return game_name, None, playtime, game_store_url
+                    
+            except requests.exceptions.RequestException as e:
+                log(f"[SteamPlugin] Ошибка сети (попытка {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return '❌ Ошибка сети! Проверьте подключение к интернету', None, None, None
+            except json.JSONDecodeError as e:
+                log(f"[SteamPlugin] Ошибка JSON: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return '❌ Ошибка: Неверный ответ от Steam API', None, None, None
+            except Exception as e:
+                log(f"[SteamPlugin] Неизвестная ошибка: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return f'❌ Ошибка: {str(e)}', None, None, None
+
+    def _dismiss_dialog(self):
+        global progress_dialog
+        try:
+            if progress_dialog is not None and progress_dialog.isShowing():
+                progress_dialog.dismiss()
+        except Exception:
+            pass
+        finally:
+            progress_dialog = None
+
+    def get_steam_library(self, steam_id, api_key):
+        """Получает список игр из библиотеки Steam пользователя"""
+        log(f"[SteamPlugin] Получение библиотеки игр для Steam ID: {steam_id}")
+        
+        if not steam_id or not steam_id.strip() or not steam_id.isdigit():
+            error_msg = "❌ Ошибка: Неверный Steam ID"
+            log(f"[SteamPlugin] {error_msg}")
+            return None, error_msg
+            
+        if not api_key or not api_key.strip():
+            error_msg = "❌ Ошибка: Не указан API ключ"
+            log(f"[SteamPlugin] {error_msg}")
+            return None, error_msg
+            
+        url = 'http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/'
+        params = {
+            'key': api_key,
+            'steamid': steam_id,
+            'include_appinfo': 1,
+            'include_played_free_games': 1,
+            'format': 'json'
+        }
+        
+        try:
+            log(f"[SteamPlugin] Отправка запроса к Steam API: {url}")
+            response = requests.get(url, params=params, timeout=20)
+            log(f"[SteamPlugin] Получен ответ. Статус: {response.status_code}")
+            
+            if response.status_code != 200:
+                error_msg = f"❌ Ошибка API: {response.status_code} - {response.text}"
+                log(f"[SteamPlugin] {error_msg}")
+                return None, error_msg
+                
+            data = response.json()
+            log(f"[SteamPlugin] Ответ API: {json.dumps(data, ensure_ascii=False)[:500]}...")
+            
+            if 'response' not in data:
+                error_msg = "❌ Ошибка: Некорректный ответ от Steam API"
+                log(f"[SteamPlugin] {error_msg}")
+                return None, error_msg
+                
+            if 'games' not in data['response']:
+                error_msg = "❌ Ошибка: Не удалось получить список игр. Проверьте настройки приватности профиля."
+                log(f"[SteamPlugin] {error_msg}")
+                return None, error_msg
+                
+            games = data['response'].get('games', [])
+            log(f"[SteamPlugin] Найдено игр: {len(games)}")
+            
+            if not games:
+                log("[SteamPlugin] Библиотека игр пуста")
+                return [], "📚 Ваша библиотека игр пуста"
+                
+            sorted_games = sorted(games, key=lambda x: x.get('playtime_forever', 0), reverse=True)
+            log(f"[SteamPlugin] Успешно получено и отсортировано {len(sorted_games)} игр")
+            return sorted_games, None
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = f"❌ Ошибка сети: {str(e)}"
+            log(f"[SteamPlugin] {error_msg}")
+            return None, error_msg
+        except json.JSONDecodeError as e:
+            error_msg = f"❌ Ошибка разбора JSON: {str(e)}"
+            log(f"[SteamPlugin] {error_msg}")
+            return None, error_msg
+        except Exception as e:
+            import traceback
+            error_msg = f"❌ Неизвестная ошибка: {str(e)}\n{traceback.format_exc()}"
+            log(f"[SteamPlugin] {error_msg}")
+            return None, error_msg
+
+    def on_callback_query_hook(self, account, params):
+        """Обработчик нажатий на inline-кнопки"""
+        try:
+            if not hasattr(params, 'data'):
+                return HookResult()
+                
+            data = params.data
+            log(f"[SteamPlugin] Получен callback: {data}")
+            
+            if data.startswith('sort_'):
+                sort_type, steam_id = data.split('_', 1)[1].split('_', 1)
+                
+                api_key = self.get_setting("api_key", "").strip()
+                
+                try:
+                    get_messages_controller().callCallbackQuery(params.query_id, "")
+                except:
+                    pass
+                
+                self.send_sorted_library(params.peer, steam_id, api_key, sort_type)
+                
+                try:
+                    get_messages_controller().editMessageReplyMarkup(params.peer, params.msg_id, None)
+                except Exception as e:
+                    log(f"[SteamPlugin] Ошибка при удалении кнопок: {str(e)}")
+                
+                return HookResult(strategy=HookStrategy.CANCEL)
+                
+        except Exception as e:
+            log(f"[SteamPlugin] Ошибка в on_callback_query_hook: {str(e)}")
+            import traceback
+            log(f"[SteamPlugin] Трассировка: {traceback.format_exc()}")
+            
+        return HookResult()
+        
+    def send_sorted_library(self, peer, steam_id, api_key, sort_type='hours', full_list=False):
+
+        def _send():
+            try:
+                log(f"[SteamPlugin] Загрузка библиотеки с сортировкой: {sort_type}, full_list={full_list}")
+                games, error = self.get_steam_library(steam_id, api_key)
+                
+                if error:
+                    log(f"[SteamPlugin] Ошибка при получении библиотеки: {error}")
+                    send_message({"peer": peer, "message": error})
+                    return
+                    
+                if not games:
+                    log("[SteamPlugin] Библиотека игр пуста")
+                    send_message({"peer": peer, "message": "📚 Ваша библиотека игр пуста"})
+                    return
+                
+                if sort_type == 'hours':
+                    games_sorted = sorted(games, key=lambda x: x.get('playtime_forever', 0), reverse=True)
+                    sort_text = "По времени игры (по убыванию)"
+                else:
+                    games_sorted = sorted(games, 
+                        key=lambda x: x.get('rtime_last_played', x.get('last_played', 0)), 
+                        reverse=True)
+                    sort_text = "По дате последнего запуска"
+                
+                games_list = []
+                total_games = len(games_sorted)
+                total_playtime = sum(game.get('playtime_forever', 0) for game in games_sorted) // 60
+                
+                max_games = 30
+                games_to_show = games_sorted[:max_games]
+                
+                for i, game in enumerate(games_to_show, 1):
+                    try:
+                        name = game.get('name', 'Неизвестная игра')
+                        playtime = game.get('playtime_forever', 0)
+                        hours = playtime // 60
+                        minutes = playtime % 60
+                        
+                        last_played = ""
+                        if sort_type == 'last_played' and 'rtime_last_played' in game:
+                            from datetime import datetime
+                            last_played_ts = game['rtime_last_played']
+                            if last_played_ts > 0:
+                                last_played_date = datetime.fromtimestamp(last_played_ts).strftime('%d.%m.%Y')
+                                last_played = f" (последний раз: {last_played_date})"
+                        
+                        if hours > 0:
+                            playtime_str = f"{hours}ч {minutes}м{last_played}"
+                        else:
+                            playtime_str = f"{minutes}м{last_played}"
+                            
+                        games_list.append(f"{i}. {name} - {playtime_str}")
+                    except Exception as game_err:
+                        log(f"[SteamPlugin] Ошибка при обработке игры {i}: {str(game_err)}")
+                
+                if total_games > max_games:
+                    games_list.append(f"\n...и еще {total_games - max_games} игр")
+                
+                if full_list:
+                    message = f"🎮 *Полная библиотека Steam*\nВсего игр: {total_games} | Общее время: {total_playtime}ч\n\n"
+                    
+                    games_by_letter = {}
+                    for game in games_sorted:
+                        name = game.get('name', 'Неизвестная игра')
+                        first_letter = name[0].upper() if name and name[0].isalpha() else '#'
+                        if first_letter not in games_by_letter:
+                            games_by_letter[first_letter] = []
+                        games_by_letter[first_letter].append(name)
+                    
+                    sorted_letters = sorted(games_by_letter.keys())
+                    
+                    for letter in sorted_letters:
+                        games_str = ', '.join(games_by_letter[letter])
+                        message += f"\n*{letter}*: {games_str}\n"
+                    
+                    message += f"\n📊 *Сортировка:* {sort_text}"
+                else:
+                    sort_buttons = [
+                        [{"text": "🕒 По времени игры", "callback_data": f"sort_hours_{steam_id}"}],
+                        [{"text": "📅 По дате последнего запуска", "callback_data": f"sort_last_played_{steam_id}"}]
+                    ]
+
+                    message = f"🎮 *Библиотека игр Steam*\nВсего игр: {total_games} | Общее время: {total_playtime}ч\n\n"
+                    message += "\n".join(games_list)
+                    message += f"\n\n📊 *Сортировка:* {sort_text}"
+                
+                log(f"[SteamPlugin] Отправляем {'полный' if full_list else 'отсортированный'} список игр")
+                parsed = parse_markdown(message)
+                
+                message_data = {
+                    "peer": peer,
+                    "message": parsed.text,
+                    "entities": [entity.to_tlrpc_object() for entity in parsed.entities]
+                }
+                
+                if not full_list and 'sort_buttons' in locals():
+                    message_data["reply_markup"] = {"inline_keyboard": sort_buttons}
+                
+                send_message(message_data)
+                
+            except Exception as e:
+                log(f"[SteamPlugin] Ошибка при отправке отсортированной библиотеки: {str(e)}")
+                import traceback
+                log(f"[SteamPlugin] Трассировка: {traceback.format_exc()}")
+                try:
+                    send_message({
+                        "peer": peer,
+                        "message": "❌ Произошла ошибка при загрузке библиотеки. Пожалуйста, проверьте логи."
+                    })
+                except:
+                    pass
+        
+        threading.Thread(target=_send, daemon=True).start()
+    
+    def on_send_message_hook(self, account, params):
+        if not hasattr(params, "message") or not isinstance(params.message, str):
+            return HookResult()
+            
+        message = params.message.strip()
+        
+        if message in (".slibrary", ".sflibrary"):
+            is_full_library = message == ".sflibrary"
+            command_name = ".sflibrary" if is_full_library else ".slibrary"
+            
+            try:
+                log(f"[SteamPlugin] Обработка команды {command_name}")
+                steam_id = self.get_setting("steam_id", "").strip()
+                api_key = self.get_setting("api_key", "").strip()
+                
+                if not steam_id:
+                    params.message = "❌ Steam ID не указан. Пожалуйста, укажите его в настройках плагина."
+                    return HookResult(strategy=HookStrategy.MODIFY, params=params)
+                    
+                if not api_key:
+                    params.message = "❌ API ключ не указан. Пожалуйста, укажите его в настройках плагина."
+                    return HookResult(strategy=HookStrategy.MODIFY, params=params)
+                
+                try:
+                    BulletinHelper.show_info("🔍 Загружаем список игр...")
+                    log("[SteamPlugin] Показано уведомление о загрузке")
+                except Exception as e:
+                    log(f"[SteamPlugin] Ошибка при показе уведомления: {str(e)}")
+                
+                def send_library_message(peer):
+                    try:
+                        log("[SteamPlugin] Загрузка библиотеки...")
+                        games, error = self.get_steam_library(steam_id, api_key)
+                        
+                        if error:
+                            log(f"[SteamPlugin] Ошибка при получении библиотеки: {error}")
+                            message = error
+                        else:
+                            if not games:
+                                log("[SteamPlugin] Библиотека игр пуста")
+                                message = "📚 Ваша библиотека игр пуста"
+                            else:
+                                log(f"[SteamPlugin] Успешно получено {len(games)} игр")
+                                games_sorted = sorted(games, key=lambda x: x.get('playtime_forever', 0), reverse=True)
+                                
+                                games_list = []
+                                total_games = len(games_sorted)
+                                total_playtime = sum(game.get('playtime_forever', 0) for game in games_sorted) // 60 
+                                
+                                max_games = 30
+                                games_to_show = games_sorted[:max_games]
+                                
+                                for i, game in enumerate(games_to_show, 1):
+                                    try:
+                                        name = game.get('name', 'Неизвестная игра')
+                                        playtime = game.get('playtime_forever', 0)
+                                        hours = playtime // 60
+                                        minutes = playtime % 60
+                                        if hours > 0:
+                                            playtime_str = f"{hours}ч {minutes}м"
+                                        else:
+                                            playtime_str = f"{minutes}м"
+                                        games_list.append(f"{i}. {name} - {playtime_str}")
+                                    except Exception as game_err:
+                                        log(f"[SteamPlugin] Ошибка при обработке игры {i}: {str(game_err)}")
+                                
+                                if total_games > max_games:
+                                    games_list.append(f"\n...и еще {total_games - max_games} игр")
+                                
+                                sort_buttons = [
+                                    [{"text": "🕒 По времени игры", "callback_data": f"sort_hours_{steam_id}"}],
+                                    [{"text": "📅 По дате последнего запуска", "callback_data": f"sort_last_played_{steam_id}"}]
+                                ]
+                                
+                                message = f"🎮 *Библиотека игр Steam*\nВсего игр: {total_games} | Общее время: {total_playtime}ч\n\n"
+                                message += "\n".join(games_list)
+                                message += "\n\n📊 *Сортировка:* По времени игры (по убыванию)"
+                                log("[SteamPlugin] Сообщение с библиотекой сформировано")
+                        
+                        log("[SteamPlugin] Отправляем сообщение с библиотекой и кнопками")
+                        parsed = parse_markdown(message)
+                        send_message({
+                            "peer": peer,
+                            "message": parsed.text,
+                            "entities": [entity.to_tlrpc_object() for entity in parsed.entities],
+                            "reply_markup": {
+                                "inline_keyboard": sort_buttons
+                            }
+                        })
+                        
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"❌ Непредвиденная ошибка: {str(e)}\n\n{traceback.format_exc()}"
+                        log(f"[SteamPlugin] {error_msg}")
+                        try:
+                            send_message({
+                                "peer": peer,
+                                "message": "❌ Произошла ошибка при загрузке библиотеки. Пожалуйста, проверьте логи."
+                            })
+                        except:
+                            pass
+                
+                try:
+                    BulletinHelper.show_info("🔍 Загружаем список игр...")
+                    sort_type = 'hours' if self.get_setting("sort_by_playtime", True) else 'last_played'
+                    self.send_sorted_library(params.peer, steam_id, api_key, sort_type, is_full_library)
+                except Exception as e:
+                    log(f"[SteamPlugin] Ошибка при запуске потока: {str(e)}")
+                    params.message = "❌ Ошибка при запуске загрузки библиотеки"
+                    return HookResult(strategy=HookStrategy.MODIFY, params=params)
+                
+                return HookResult(strategy=HookStrategy.CANCEL)
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"❌ Критическая ошибка: {str(e)}\n\n{traceback.format_exc()}"
+                log(f"[SteamPlugin] {error_msg}")
+                params.message = "❌ Произошла критическая ошибка. Пожалуйста, проверьте логи."
+                return HookResult(strategy=HookStrategy.MODIFY, params=params)
+        
+        if not message.startswith(".nowsteam"):
+            return HookResult()
+
+        try:
+            steam_id = self.get_setting("steam_id", "")
+            api_key = self.get_setting("api_key", "")
+            
+            log(f"[SteamPlugin] Команда .nowsteam получена. Steam ID: {steam_id}, API Key: {'*' * 8 + api_key[-4:] if api_key else 'Не установлен'}")
+            
+            if not steam_id:
+                BulletinHelper.show_error(localise("error_steam_id_not_set"))
+                return HookResult(strategy=HookStrategy.CANCEL)
+
+            if not api_key:
+                BulletinHelper.show_error(localise("error_api_key_not_set"))
+                return HookResult(strategy=HookStrategy.CANCEL)
+
+            def search_and_reply(peer):
+                try:
+                    log("[SteamPlugin] Начинаем поиск информации об игре...")
+                    result, image_url, playtime, game_url = self.get_game(steam_id, api_key)
+                    log(f"[SteamPlugin] Получен результат: {result}")
+                    
+                    if isinstance(result, str) and result.startswith('❌ Ошибка'):
+                        BulletinHelper.show_error(result)
+                        return
+
+                    if result == self.get_setting("default_stream_text", DEFAULT_STREAM_TEXT):
+                        log("[SteamPlugin] Игрок не в игре")
+                        markdown_text = f'🎮 | **{result}**'
+                        parsed = parse_markdown(markdown_text)
+                        send_message({
+                            "peer": peer,
+                            "message": parsed.text,
+                            "entities": [entity.to_tlrpc_object() for entity in parsed.entities]
+                        })
+                        return
+
+                    playtime_text = ""
+                    if isinstance(result, dict) and 'playtime' in result:
+                        log(f"[SteamPlugin] Время игры из словаря: {result['playtime']}")
+                        hours = result['playtime'] // 60
+                        minutes = result['playtime'] % 60
+                        if hours > 0:
+                            playtime_text = localise("playtime", hours=hours, minutes=minutes)
+                        else:
+                            playtime_text = localise("playtime_minutes", minutes=minutes)
+                    elif playtime is not None:
+                        log(f"[SteamPlugin] Время игры из параметра: {playtime}")
+                        hours = playtime // 60
+                        minutes = playtime % 60
+                        if hours > 0:
+                            playtime_text = localise("playtime", hours=hours, minutes=minutes)
+                        else:
+                            playtime_text = localise("playtime_minutes", minutes=minutes)
+
+                    if isinstance(result, dict):
+                        log("[SteamPlugin] Формируем сообщение из словаря с деталями")
+                        message = localise("playing_format", game=result['name'])
+                        log(f"[SteamPlugin] Базовая часть сообщения: {message}")
+                        
+                        if result.get('developers'):
+                            log(f"[SteamPlugin] Добавляем разработчиков: {result['developers']}")
+                            message += "\n" + localise("developers", developers=', '.join(result['developers']))
+                            log(f"[SteamPlugin] Сообщение после добавления разработчиков: {message}")
+                            
+                        if result.get('publishers') and result['publishers'] != result.get('developers', []):
+                            log(f"[SteamPlugin] Добавляем издателей: {result['publishers']}")
+                            message += "\n" + localise("publishers", publishers=', '.join(result['publishers']))
+                            log(f"[SteamPlugin] Сообщение после добавления издателей: {message}")
+                            
+                        log(f"[SteamPlugin] Добавляем оценку Metacritic: {result.get('metacritic', 'N/A')}")
+                        message += "\n" + localise("metacritic", score=result.get('metacritic', 'N/A'))
+                        log(f"[SteamPlugin] Сообщение после добавления Metacritic: {message}")
+                        
+                        if result.get('genres'):
+                            log(f"[SteamPlugin] Добавляем жанры: {result['genres']}")
+                            message += "\n" + localise("genres", genres=', '.join(result['genres'][:3]))
+                            log(f"[SteamPlugin] Сообщение после добавления жанров: {message}")
+                            
+                        message += playtime_text
+                        log(f"[SteamPlugin] Сообщение после добавления времени игры: {message}")
+                        
+                        if result.get('store_url'):
+                            log(f"[SteamPlugin] Добавляем ссылку на Steam Store: {result['store_url']}")
+                            message += "\n\n" + localise("game_link", url=result['store_url'])
+                            log(f"[SteamPlugin] Итоговое сообщение: {message}")
+                    else:
+                        log("[SteamPlugin] Формируем простое сообщение")
+                        message = localise("playing_format", game=result) + playtime_text
+                        if game_url:
+                            message += "\n\n" + localise("game_link", url=game_url)
+
+                    log(f"[SteamPlugin] Итоговое сообщение: {message}")
+
+                    if image_url:
+                        log(f"[SteamPlugin] Пытаемся загрузить изображение: {image_url}")
+                        temp_photo_path = self.download_game_image(image_url)
+                        if temp_photo_path:
+                            try:
+                                helper = get_send_messages_helper()
+                                generated_photo = helper.generatePhotoSizes(temp_photo_path, None)
+
+                                if generated_photo is not None:
+                                    log("[SteamPlugin] Отправляем сообщение с фото")
+                                    parsed_caption = parse_markdown(message)
+
+                                    send_message({
+                                        "peer": peer,
+                                        "photo": generated_photo,
+                                        "path": temp_photo_path,
+                                        "caption": parsed_caption.text,
+                                        "entities": [entity.to_tlrpc_object() for entity in parsed_caption.entities],
+                                        "message": None
+                                    })
+                                    self.delete_temp_file_async(temp_photo_path)
+                                    return
+                                else:
+                                    log("[SteamPlugin] Не удалось сгенерировать фото")
+                                    self.delete_temp_file_async(temp_photo_path)
+                            except Exception as e:
+                                log(f"[SteamPlugin] Ошибка при отправке фото: {e}")
+                                self.delete_temp_file_async(temp_photo_path)
+                    
+                    log("[SteamPlugin] Отправляем текстовое сообщение")
+                    parsed = parse_markdown(message)
+                    send_message({
+                        "peer": peer,
+                        "message": parsed.text,
+                        "entities": [entity.to_tlrpc_object() for entity in parsed.entities]
+                    })
+                except Exception as e:
+                    log(f"[SteamPlugin] Ошибка в потоке поиска: {e}")
+                    BulletinHelper.show_error(localise("error_unknown", e=str(e)))
+
+            try:
+                BulletinHelper.show_info(localise("searching"))
+            except Exception as e:
+                log(f"[SteamPlugin] Ошибка при создании диалога: {e}")
+
+            threading.Thread(target=lambda: search_and_reply(params.peer), daemon=True).start()
+            return HookResult(strategy=HookStrategy.CANCEL)
+            
+        except Exception as e:
+            params.message = localise("error_unknown", e=str(e))
+            return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+    def on_plugin_unload(self):
+        log("Steam plugin unloaded") 

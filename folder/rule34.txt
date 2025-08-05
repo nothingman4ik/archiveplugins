@@ -1,0 +1,381 @@
+from random import randint
+import requests
+import xml.etree.ElementTree as ET
+import threading
+import random
+import os
+import time
+from ui.settings import Header, Switch, Divider, Input, Selector
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from client_utils import send_message
+from org.telegram.ui.ActionBar import AlertDialog
+from client_utils import get_last_fragment
+from android_utils import log
+from org.telegram.messenger import ApplicationLoader
+from java.io import File
+from markdown_utils import parse_markdown
+from ui.bulletin import BulletinHelper
+from base_plugin import MenuItemData, MenuItemType
+from typing import Optional, Any
+from com.exteragram.messenger.plugins import PluginsController
+from com.exteragram.messenger.plugins.ui import PluginSettingsActivity
+import traceback
+from bs4 import BeautifulSoup
+
+__id__ = "rule34_search"
+__name__ = "Rule34Search"
+__version__ = "1.3.5"
+__description__ = "Поиск изображений на Rule34 по тегу с настройками. [.r34]"
+__author__ = "@ArThirtyFour | @KangelPlugins"
+__min_version__ = "11.12.1"
+__icon__ = "chaotianjiang/23"
+
+
+class Locales:
+    default = {
+        "tags_in_header": "Tags (include)",
+        "tags_in_text": "Tags",
+        "tags_in_subtext": 'Enter through space. Example: tag1 tag2. Leave " " for empty.',
+        "tags_ex_header": "Tags (exclude)",
+        "tags_ex_text": "Tags",
+        "tags_ex_subtext": 'Enter through ;. Example: tag1; tag2. Leave " " for empty.',
+        "antiai_text": "Anti-AI",
+        "antiai_subtext": "AI-generated content filter",
+        "usage_divider": "Usage: .r34.",
+        "not_found": "Nothing found!",
+        "not_found_filtered": "Nothing found after filtering!",
+        "request_error": "Request error: {e}",
+        "xml_parse_error": "XML parse error.",
+        "general_data_error": "An general error occurred while fetching data: {e}",
+        "unknown_site": "Unknown search site.",
+        "no_args": "No arguments!",
+        "usage": "Usage: .r34 [tag]\nExample: .r34 anime",
+        "searching": "Searching...",
+        "unexpected_url_error": "An unexpected error occurred while getting the URL.",
+        "settings_output_header": "Output Display Settings",
+        "show_requested_tags_text": "Show requested tags",
+        "show_requested_tags_subtext": "Show tags you entered in the query",
+        "show_post_tags_text": "Show tags in post",
+        "show_post_tags_subtext": "Show all tags of the found post",
+        "show_image_link_text": "Show image link",
+        "show_image_link_subtext": "Show direct link to the image",
+        "post_found_header": "🔞 *Post found!*\n\n",
+        "requested_tags_line": "🔍 *Requested tags:* `{requested_tags_str}`\n\n",
+        "post_tags_line": "🏷️ *Tags in post:* `{post_tags}`\n\n",
+        "image_link_line": "🔗 *Link:* [Open image]({image_url})",
+        "search_thread_error": "An error occurred in the search thread: {e}",
+        "posts_count_header": "Количество постов",
+        "posts_count_text": "Количество постов для поиска",
+        "posts_count_subtext": "Максимум: 1000",
+    }
+    en = default
+    ru = {
+        "tags_in_header": "Теги (включающие)",
+        "tags_in_text": "Теги",
+        "tags_in_subtext": 'Введите через пробел. Пример: tag1 tag2. Оставьте " " для пустых.',
+        "tags_ex_header": "Теги (исключающие)",
+        "tags_ex_text": "Теги",
+        "tags_ex_subtext": 'Введите через ;. Пример: tag1; tag2. Оставьте " " для пустых.',
+        "antiai_text": "Анти-ИИ",
+        "antiai_subtext": "Фильтр сгенерированного ИИ контента",
+        "usage_divider": "Использование: .r34.",
+        "not_found": "Ничего не найдено!",
+        "not_found_filtered": "Ничего не найдено после фильтрации!",
+        "request_error": "Ошибка при запросе: {e}",
+        "xml_parse_error": "Ошибка при парсинге XML.",
+        "general_data_error": "Произошла общая ошибка при получении данных: {e}",
+        "unknown_site": "Неизвестный сайт для поиска.",
+        "no_args": "Нет агрументов!",
+        "usage": "Использование: .r34 [тег]\nПример: .r34 anime",
+        "searching": "Ищем...",
+        "unexpected_url_error": "Произошла непредвиденная ошибка при получении URL.",
+        "post_found_header": "🔞 *Найден пост!*\n\n",
+        "requested_tags_line": "🔍 *Запрошенные теги:* `{requested_tags_str}`\n\n",
+        "post_tags_line": "🏷️ *Теги в посте:* `{post_tags}`\n\n",
+        "image_link_line": "🔗 *Ссылка:* [Открыть изображение]({image_url})",
+        "search_thread_error": "Произошла ошибка в потоке поиска: {e}",
+        "settings_output_header": "Настройки вывода результата",
+        "show_requested_tags_text": "Показывать запрошенные теги",
+        "show_requested_tags_subtext": "Показывать теги, которые вы ввели в запросе",
+        "show_post_tags_text": "Показывать теги в посте",
+        "show_post_tags_subtext": "Показывать все теги найденного поста",
+        "show_image_link_text": "Показывать ссылку на изображение",
+        "show_image_link_subtext": "Показывать прямую ссылку на изображение",
+        "posts_count_header": "Количество постов",
+        "posts_count_text": "Количество постов для поиска",
+        "posts_count_subtext": "Максимум: 1000",
+    }
+
+def localise(key: str) -> str:
+    from java.util import Locale
+    lang = Locale.getDefault().getLanguage()
+    locale_dict = getattr(Locales, lang, Locales.default)
+    return locale_dict.get(key, key)
+
+class Rule34SearchPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._cache = {}
+        self._cache_expiry = {}
+
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        log("rule34_search plugin loaded")
+
+    def on_plugin_unload(self):
+        log("rule34_search plugin unloaded")
+
+    def create_settings(self):
+        settings = [
+            Divider(),
+            Header(text=localise("tags_in_header")),
+            Input(
+                key="tags_in",
+                text=localise("tags_in_text"),
+                default="",
+                subtext=localise("tags_in_subtext"),
+                icon="msg_folders_read"
+            ),
+            Header(text=localise("tags_ex_header")),
+            Input(
+                key="tags_ex",
+                text=localise("tags_ex_text"),
+                default="ai_generated",
+                subtext=localise("tags_ex_subtext"),
+                icon="msg_panel_clear"
+            ),
+            Divider(),
+        ]
+        display_options = [
+            ("antiai", localise("antiai_text"), localise("antiai_subtext")),
+        ]
+        for key, text, subtext in display_options:
+            settings.append(Switch(key=key, text=text, default=True, subtext=subtext, icon="msg_photo_settings"))
+        settings.append(Divider(text=localise("usage_divider")))
+        
+        settings.append(Header(text=localise("settings_output_header")))
+        settings.append(Switch(
+            key="show_requested_tags",
+            text=localise("show_requested_tags_text"),
+            default=True,
+            subtext=localise("show_requested_tags_subtext"),
+            icon="msg_reorder"
+        ))
+        settings.append(Switch(
+            key="show_post_tags",
+            text=localise("show_post_tags_text"),
+            default=True,
+            subtext=localise("show_post_tags_subtext"),
+            icon="files_storage"
+        ))
+        settings.append(Switch(
+            key="show_image_link",
+            text=localise("show_image_link_text"),
+            default=True,
+            subtext=localise("show_image_link_subtext"),
+            icon="msg_stories_link"
+        ))
+        settings.append(Divider())
+
+        settings.append(Header(text=localise("posts_count_header")))
+        settings.append(Input(
+            key="posts_count",
+            text=localise("posts_count_text"),
+            default="100",
+            subtext=localise("posts_count_subtext"),
+            icon="msg_views"
+        ))
+        settings.append(Divider())
+
+        return settings
+
+    def get_image(self, query):
+        tags_in_setting = self.get_setting("tags_in", "nude")
+        tags_ex_setting = self.get_setting("tags_ex", "ai_generated")
+        antiai = self.get_setting("antiai", True)
+        posts_count = int(self.get_setting("posts_count", "100"))
+        
+        search_tags = f"{tags_in_setting} {query}".strip()
+        tags_ex = tags_ex_setting.split("; ")
+
+        log(f"[Rule34] Начинаем поиск. Запрос: '{search_tags}', лимит: {posts_count}")
+        log(f"[Rule34] Исключающие теги: {tags_ex}")
+        log(f"[Rule34] Анти-AI включен: {antiai}")
+
+        try:
+            response = requests.get(f"https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&limit={posts_count}&tags={search_tags}")
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'lxml')
+            posts_list = []
+            for post in soup.find_all('post'):
+                post_data = post.attrs
+                post_data['tags'] = post_data['tags'].split()
+                posts_list.append(post_data)
+
+            log(f"[Rule34] Получено постов с API: {len(posts_list)}")
+
+            if not posts_list:
+                log("[Rule34] Посты не найдены!")
+                return localise("not_found")
+
+            filtered_posts = []
+            excluded_count = 0
+            for post in posts_list:
+                tags_ex_count = 0
+                for tag_ex in tags_ex:
+                    if tag_ex and tag_ex in post['tags']:
+                        tags_ex_count += 1
+                        log(f"[Rule34] Пост исключен из-за тега '{tag_ex}': {post.get('id', 'unknown')}")
+                if antiai:
+                    anti_ai_tags = ['ai_generated', 'stable_diffusion', 'midjourney', 'dall-e', 'artificial_intelligence', 'neural_network', 'machine_learning', 'deepfake', 'ai_art', 'ai-generated', 'generated_by_ai', 'dall_e', 'dalle', 'novelai', 'waifu_diffusion']
+                    for anti_ai_tag in anti_ai_tags:
+                        if anti_ai_tag in post['tags']:
+                            tags_ex_count += 1
+                            log(f"[Rule34] Пост исключен из-за AI тега '{anti_ai_tag}': {post.get('id', 'unknown')}")
+                if tags_ex_count == 0:
+                    filtered_posts.append(post)
+                else:
+                    excluded_count += 1
+            
+            log(f"[Rule34] После фильтрации: {len(filtered_posts)} постов подходит, {excluded_count} исключено")
+            
+            if not filtered_posts:
+                log("[Rule34] Нет подходящих постов после фильтрации!")
+                return localise("not_found_filtered")
+
+            random_post = random.choice(filtered_posts)
+            log(f"[Rule34] Выбран случайный пост ID: {random_post.get('id', 'unknown')}")
+
+            return random_post
+
+        except requests.exceptions.RequestException as e:
+            log(f"[Rule34] Ошибка запроса: {e}")
+            if "SSLCertVerificationError" in str(e):
+                BulletinHelper.show_error("Сайт Rule34.xxx заблокирован! Включите VPN.")
+            else:
+                BulletinHelper.show_error(localise("request_error").format(e=e))
+            return None
+        except ET.ParseError:
+            log("[Rule34] Ошибка парсинга XML")
+            BulletinHelper.show_error(localise("xml_parse_error"))
+            return None
+        except Exception as e:
+            log(f"[Rule34] Общая ошибка: {e}")
+            BulletinHelper.show_error(localise("general_data_error").format(e=e))
+            return None
+
+    def on_send_message_hook(self, account, params):
+        if not hasattr(params, 'message') or not isinstance(params.message, str):
+            return HookResult()
+
+        msg = params.message.strip()
+        usage = localise("usage")
+
+        if not msg.startswith(".r34"):
+            return HookResult()
+
+        log("[Rule34] Команда .r34 обнаружена")      
+
+        parts = msg.split(" ", 1)
+        query = ""
+        if len(parts) > 1:
+            query = parts[1].strip()
+
+        log(f"[Rule34] Запрос: '{query}'")
+
+        if not query and not self.get_setting("tags_in", "nude").strip():
+             params.message = usage
+             return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+        def search_and_reply(search_query, peer, reply_to_msg=None, reply_to_top_msg=None):
+            log(f"[Rule34] Начинаем поиск в потоке. Запрос: '{search_query}'")
+            try:
+                # Call the actual search function
+                result = self.get_image(search_query)
+
+                log(f"[Rule34] Результат поиска получен: {type(result)}")
+
+                # Send the result message on UI thread
+                if isinstance(result, dict) and result.get("file_url"):
+                    log(f"[Rule34] Отправляем пост с изображением: {result.get('id', 'unknown')}")
+                    tags_in_setting = self.get_setting("tags_in", "")
+                    requested_tags = (tags_in_setting + (" " + query if query else "")).strip()
+                    requested_tags_str = requested_tags if requested_tags else "(пусто)"
+                    post_tags = ", ".join(result.get('tags', []))
+                    image_url = result.get("file_url")
+
+                    message_text = localise("post_found_header")
+                    
+                    if self.get_setting("show_requested_tags", True):
+                        message_text += localise("requested_tags_line").format(requested_tags_str=requested_tags_str)
+                    
+                    if self.get_setting("show_post_tags", True):
+                        message_text += localise("post_tags_line").format(post_tags=post_tags)
+                    
+                    if self.get_setting("show_image_link", True):
+                        message_text += localise("image_link_line").format(image_url=image_url)
+
+                    parsed_message = parse_markdown(message_text)
+                    message_params = {
+                        "peer": peer,
+                        "message": parsed_message.text,
+                        "entities": [entity.to_tlrpc_object() for entity in parsed_message.entities]
+                    }
+                    
+                    # Добавляем поддержку топиков
+                    if reply_to_msg is not None:
+                        message_params["replyToMsg"] = reply_to_msg
+                    if reply_to_top_msg is not None:
+                        message_params["replyToTopMsg"] = reply_to_top_msg
+                        
+                    send_message(message_params)
+                elif isinstance(result, str):
+                    log(f"[Rule34] Отправляем текстовое сообщение: {result}")
+                    message_params = {
+                        "peer": peer,
+                        "message": result
+                    }
+                    
+                    # Добавляем поддержку топиков
+                    if reply_to_msg is not None:
+                        message_params["replyToMsg"] = reply_to_msg
+                    if reply_to_top_msg is not None:
+                        message_params["replyToTopMsg"] = reply_to_top_msg
+                        
+                    send_message(message_params)
+                elif result is None:
+                    log("[Rule34] Результат None, ничего не отправляем")
+                    pass
+                else:
+                    log(f"[Rule34] Неожиданный тип результата: {type(result)}")
+                    message_params = {
+                        "peer": peer,
+                        "message": localise("unexpected_url_error")
+                    }
+                    
+                    # Добавляем поддержку топиков
+                    if reply_to_msg is not None:
+                        message_params["replyToMsg"] = reply_to_msg
+                    if reply_to_top_msg is not None:
+                        message_params["replyToTopMsg"] = reply_to_top_msg
+                        
+                    send_message(message_params)
+
+            except Exception as e:
+                log(f"[Rule34] Ошибка в потоке поиска: {e}")
+                BulletinHelper.show_error(localise("search_thread_error").format(e=e))
+
+        try:
+            BulletinHelper.show_info(localise("searching"))
+        except Exception as e:
+            log(f"[Rule34] Ошибка при создании диалога: {e}")
+
+        log("[Rule34] Запускаем поток поиска")
+        
+        threading.Thread(target=lambda: search_and_reply(query, params.peer, params.replyToMsg, params.replyToTopMsg), daemon=True).start()
+
+        params.message = localise("searching")
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    def _dismiss_dialog(self):
+        pass

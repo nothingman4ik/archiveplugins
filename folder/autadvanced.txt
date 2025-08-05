@@ -1,0 +1,263 @@
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.settings import Header, Input, Divider, Switch, Selector
+from typing import Any, Dict
+from client_utils import get_messages_controller
+from markdown_utils import parse_markdown
+from java.util import ArrayList
+from org.telegram.tgnet import TLRPC
+
+__id__ = "auto_advanced"
+__name__ = "Автоматическая подпись к сообщению"
+__description__ = "Добавляет настраиваемую подпись к каждому отправляемому сообщению с возможностью форматирования."
+__author__ = "@aprux"
+__version__ = "1.1"
+__icon__ = "Emojis/1"
+__min_version__ = "11.12.0"
+
+class AutoSignaturePlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self.log("Плагин 'Автоматическая подпись (Расширенная)' загружен.")
+
+    def create_settings(self):
+        return [
+            Header(text="Основные настройки подписи"),
+            Switch(
+                key="enable_signature",
+                text="Включить автоматическую подпись",
+                default=False,
+                subtext="Добавлять подпись ко всем исходящим сообщениям",
+                icon="msg_emoji_edit"
+            ),
+            Input(
+                key="signature_text",
+                text="Текст подписи",
+                default="",
+                subtext="Введите текст, который будет добавлен к вашим сообщениям. Поддерживается Markdown V2.",
+                icon="msg_pen"
+            ),
+            Selector(
+                key="signature_placement",
+                text="Положение подписи",
+                default=1,
+                items=["В начале сообщения", "В конце сообщения"],
+                icon="msg_arrow_down"
+            ),
+            Divider(text="Применять глобальную подпись в:"),
+            Switch(
+                key="enable_for_private",
+                text="Личных сообщениях",
+                default=True,
+                subtext="Добавлять подпись в личных чатах",
+                icon="msg_chat"
+            ),
+            Switch(
+                key="enable_for_groups",
+                text="Группах",
+                default=True,
+                subtext="Добавлять подпись в обычных и супергруппах",
+                icon="msg_group"
+            ),
+            Switch(
+                key="enable_for_channels",
+                text="Каналах",
+                default=True,
+                subtext="Добавлять подпись при отправке от имени канала",
+                icon="msg_channel"
+            ),
+            Divider(text="Настройки для конкретных чатов (для глобальной подписи)"),
+            Switch(
+                key="restrict_to_selected_chats",
+                text="Применять только в выбранных чатах",
+                default=False,
+                subtext="Глобальная подпись будет добавляться только в указанных чатах",
+                icon="msg_contact_check"
+            ),
+            Input(
+                key="allowed_chat_ids",
+                text="ID разрешенных чатов",
+                default="",
+                subtext="Введите ID чатов через запятую (например, 12345, 1001234567890)",
+                icon="msg_add_contact"
+            ),
+            Divider(text="Настройки для отдельных чатов (переопределяют глобальные)"),
+            Switch(
+                key="enable_per_chat_signatures",
+                text="Включить подписи для отдельных чатов",
+                default=False,
+                subtext="Использовать индивидуальные подписи для указанных чатов",
+                icon="msg_contacts"
+            ),
+            Input(
+                key="per_chat_signatures_data",
+                text="Настройка подписей для чатов",
+                default="",
+                subtext="Формат: ID_чата:Текст подписи;ID_чата2:Текст подписи2",
+                icon="msg_settings"
+            ),
+            Divider()
+        ]
+
+    def _parse_per_chat_signatures(self, data_string: str) -> Dict[int, str]:
+        signatures = {}
+        if not data_string:
+            return signatures
+            
+        entries = data_string.split(';')
+        for entry in entries:
+            entry = entry.strip()
+            if not entry:
+                continue
+                
+            parts = entry.split(':', 1)
+            if len(parts) == 2:
+                chat_id_str, signature_text = parts[0].strip(), parts[1].strip()
+                try:
+                    chat_id = int(chat_id_str)
+                    signatures[chat_id] = signature_text
+                except ValueError:
+                    self.log(f"AutoSignature: Некорректный ID чата в '{entry}'. Пропускаем.")
+            else:
+                self.log(f"AutoSignature: Некорректный формат записи '{entry}'. Ожидается 'ID:Текст'. Пропускаем.")
+                
+        return signatures
+
+    def _safe_get_setting(self, key: str, default: Any = None) -> Any:
+        """Безопасное получение значения настройки с обработкой None"""
+        value = self.get_setting(key, default)
+        return value if value is not None else default
+
+    def _safe_strip(self, text: str) -> str:
+        """Безопасное удаление пробелов с обработкой None"""
+        return text.strip() if text is not None else ""
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        # Определяем тип сообщения
+        has_text = isinstance(params.message, str)
+        has_caption = hasattr(params, 'caption') and isinstance(params.caption, str)
+        
+        if not (has_text or has_caption):
+            return HookResult()
+
+        # Безопасное получение всех настроек
+        signature_placement_index = self._safe_get_setting("signature_placement", 1)
+        enable_for_private = self._safe_get_setting("enable_for_private", True)
+        enable_for_groups = self._safe_get_setting("enable_for_groups", True)
+        enable_for_channels = self._safe_get_setting("enable_for_channels", True)
+        restrict_to_selected_chats = self._safe_get_setting("restrict_to_selected_chats", False)
+        allowed_chat_ids_str = self._safe_strip(self._safe_get_setting("allowed_chat_ids", ""))
+        enable_per_chat_signatures = self._safe_get_setting("enable_per_chat_signatures", False)
+        per_chat_signatures_data = self._safe_strip(self._safe_get_setting("per_chat_signatures_data", ""))
+        
+        effective_signature_text_markdown = None
+        current_peer_check_id = abs(params.peer)
+        messages_controller = get_messages_controller()
+
+        # 1. Попытка получить подпись для конкретного чата
+        if enable_per_chat_signatures and per_chat_signatures_data:
+            per_chat_map = self._parse_per_chat_signatures(per_chat_signatures_data)
+            if current_peer_check_id in per_chat_map:
+                temp_per_chat_sig = self._safe_strip(per_chat_map[current_peer_check_id])
+                if temp_per_chat_sig:
+                    effective_signature_text_markdown = temp_per_chat_sig
+
+        # 2. Глобальная подпись (если не задана индивидуальная)
+        if effective_signature_text_markdown is None:
+            enable_global_signature = self._safe_get_setting("enable_signature", False)
+            global_signature_text = self._safe_get_setting("signature_text", "")
+            global_signature_text_markdown = self._safe_strip(global_signature_text)
+            
+            if not enable_global_signature or not global_signature_text_markdown:
+                return HookResult()
+
+            # Определяем тип чата
+            is_private_chat = False
+            is_group = False
+            is_channel = False
+            
+            peer_id = params.peer
+            if peer_id > 0:
+                is_private_chat = True
+            else:
+                chat_obj = messages_controller.getChat(abs(peer_id))
+                if chat_obj:
+                    if isinstance(chat_obj, TLRPC.TL_channel):
+                        is_channel = True
+                    else:
+                        is_group = True
+                else:
+                    is_private_chat = True
+                    self.log(f"AutoSignature: Не удалось определить тип чата для peer_id {peer_id}")
+
+            # Применяем фильтры по типу чата
+            if (is_private_chat and not enable_for_private) or \
+               (is_group and not enable_for_groups) or \
+               (is_channel and not enable_for_channels):
+                return HookResult()
+
+            # Фильтр по разрешенным чатам
+            if restrict_to_selected_chats and allowed_chat_ids_str:
+                allowed_chat_ids_set = set()
+                try:
+                    allowed_chat_ids_set = {int(s.strip()) for s in allowed_chat_ids_str.split(',') if s.strip()}
+                except ValueError as e:
+                    self.log(f"AutoSignature: Ошибка парсинга ID чатов: {e}")
+                    return HookResult()
+                    
+                if current_peer_check_id not in allowed_chat_ids_set:
+                    return HookResult()
+
+            effective_signature_text_markdown = global_signature_text_markdown
+
+        # 3. Если подпись не определена, выходим
+        if not effective_signature_text_markdown:
+            return HookResult()
+
+        # 4. Применяем подпись к сообщению
+        if has_text:
+            original_text = params.message
+            original_entities = params.entities
+        else:  # has_caption
+            original_text = params.caption
+            original_entities = params.caption_entities if hasattr(params, 'caption_entities') else None
+
+        # Парсим Markdown в подписи
+        signature_parsed = parse_markdown(effective_signature_text_markdown)
+        signature_plain_text = signature_parsed.text
+        signature_raw_entities = signature_parsed.entities
+
+        # Собираем новый текст
+        if signature_placement_index == 0:  # В начале
+            new_text = f"{signature_plain_text}\n{original_text}"
+            offset_shift = len(signature_plain_text) + 1
+        else:  # В конце
+            new_text = f"{original_text}\n{signature_plain_text}"
+            offset_shift = len(original_text) + 1
+
+        # Обработка сущностей
+        new_entities = ArrayList()
+        
+        # Копируем оригинальные сущности
+        if original_entities:
+            for i in range(original_entities.size()):
+                entity = original_entities.get(i)
+                if signature_placement_index == 0:
+                    entity.offset += offset_shift
+                new_entities.add(entity)
+
+        # Добавляем сущности подписи
+        for raw_entity in signature_raw_entities:
+            entity = raw_entity.to_tlrpc_object()
+            if signature_placement_index == 1:  # Для подписи в конце
+                entity.offset += offset_shift
+            new_entities.add(entity)
+
+        # Обновляем параметры сообщения
+        if has_text:
+            params.message = new_text
+            params.entities = new_entities
+        else:
+            params.caption = new_text
+            params.caption_entities = new_entities
+
+        return HookResult(strategy=HookStrategy.MODIFY, params=params)

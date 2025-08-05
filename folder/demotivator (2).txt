@@ -1,0 +1,454 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              🖼️ ДЕМОТИВАТОР 🖼️                              ║
+║                                                                              ║
+║  Плагин для создания демотиваторов из фотографий с текстом                   ║
+║  Использование: .demot [текст] - ответ на фото                               ║
+║  Пример: .demot Редкий кадр\nолень охотится на лося                          ║
+║                                                                              ║
+║  Автор: @mihailkotovski & @mishabotov                                        ║
+║  ФОРК ДЕЛАТЬ ЗАПРЕЩЕНО!!!                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
+import os
+import uuid
+import time
+import threading
+import traceback
+from typing import Any, Optional
+from PIL import Image, ImageDraw, ImageFont
+from java.io import File
+from java.util import Locale
+from org.telegram.messenger import ApplicationLoader, MessageObject, FileLoader, UserConfig, ImageLocation
+from org.telegram.tgnet import TLRPC
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from client_utils import send_message, get_send_messages_helper, get_last_fragment
+from android_utils import log, run_on_ui_thread
+from ui.bulletin import BulletinHelper
+from ui.alert import AlertDialogBuilder
+from ui.settings import Header, Input, Divider, Text, Switch, Selector
+
+__id__ = "demotivator"
+__name__ = "Demotivator"
+__description__ = "Create demotivators from photos with text"
+__author__ = "@mihailkotovski & @mishabotov"
+__version__ = "1.1.0"
+__min_version__ = "11.9.1"
+__icon__ = "DMJDuckX/13"
+
+TEMP_DIR_NAME = "DemotivatorTemp"
+
+FONT_PATHS = [
+    "/system/fonts/Roboto-Bold.ttf",
+    "/system/fonts/DroidSans-Bold.ttf",
+    "/system/fonts/NotoSans-Bold.ttf",
+    "/system/fonts/Roboto-Regular.ttf",
+    "/system/fonts/DroidSans.ttf",
+    "/system/fonts/NotoSans-Regular.ttf"
+]
+
+FONT_NAMES = {
+    "ru": ["По умолчанию", "Roboto Bold", "DroidSans Bold", "NotoSans Bold", "Roboto Regular", "DroidSans Regular", "NotoSans Regular"],
+    "en": ["Default", "Roboto Bold", "DroidSans Bold", "NotoSans Bold", "Roboto Regular", "DroidSans Regular", "NotoSans Regular"]
+}
+
+TRANSLATIONS = {
+    "settings_header": ("Настройки демотиватора", "Demotivator Settings"),
+    "enable_plugin": ("Включить плагин", "Enable Plugin"),
+    "font_size_title": ("Размер шрифта заголовка", "Title Font Size"),
+    "font_size_subtitle": ("Размер шрифта подзаголовка", "Subtitle Font Size"),
+    "font_family": ("Семейство шрифта", "Font Family"),
+    "border_width": ("Ширина рамки", "Border Width"),
+    "usage_info": ("Использование", "Usage"),
+    "usage_text": (".demot [текст] - ответ на фото\nПример: .demot Редкий кадр\\nолень охотится на лося", ".demot [text] - reply to photo\nExample: .demot Rare shot\\ndeer hunting moose"),
+    "no_reply": ("❌ Команда должна быть ответом на сообщение с фотографией", "❌ Command must be a reply to a message with photo"),
+    "no_photo": ("❌ Сообщение не содержит фотографию", "❌ Message doesn't contain a photo"),
+    "no_text": ("❌ Укажите текст для демотиватора", "❌ Specify text for demotivator"),
+    "processing": ("🖼️ Создаю демотиватор...", "🖼️ Creating demotivator..."),
+    "error": ("❌ Ошибка создания демотиватора: {error}", "❌ Error creating demotivator: {error}"),
+    "download_error": ("❌ Не удалось загрузить фотографию. Попробуйте еще раз.", "❌ Failed to download photo. Please try again."),
+    "create_error": ("❌ Не удалось создать демотиватор. Проверьте изображение.", "❌ Failed to create demotivator. Check the image."),
+    "send_error": ("❌ Ошибка отправки: {error}", "❌ Sending error: {error}"),
+    "already_processing": ("Уже обрабатывается другой запрос", "Another request is already being processed"),
+    "image_processing_error": ("❌ Ошибка обработки изображения. Попробуйте другое фото.", "❌ Image processing error. Try another photo."),
+    "success": ("✅ Демотиватор создан и отправлен!", "✅ Demotivator created and sent!"),
+}
+
+def Z(key, **kwargs):
+    lang = Locale.getDefault().getLanguage()
+    idx = 0 if lang.startswith('ru') else 1
+    text = TRANSLATIONS.get(key, (key, key))[idx]
+    return text.format(**kwargs) if kwargs else text
+
+class DemotivatorPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._temp_dir = None
+        self._processing = False
+
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self._temp_dir = self._get_temp_dir()
+        if self._temp_dir:
+            log("[Demotivator] Plugin loaded successfully")
+            self._cleanup_old_files()
+        else:
+            log("[Demotivator] Failed to initialize temp directory")
+
+    def on_plugin_unload(self):
+        log("[Demotivator] Plugin unloaded")
+
+    def _get_temp_dir(self) -> Optional[File]:
+        try:
+            base_dir = ApplicationLoader.getFilesDirFixed()
+            if not base_dir: return None
+            temp_dir = File(base_dir, TEMP_DIR_NAME)
+            if not temp_dir.exists() and not temp_dir.mkdirs(): return None
+            return temp_dir
+        except Exception as e:
+            log(f"[Demotivator] Error creating temp dir: {e}")
+            return None
+
+    def _cleanup_old_files(self, max_age_hours=2):
+        if not self._temp_dir: return
+        try:
+            now = time.time()
+            max_age_seconds = max_age_hours * 3600
+            for file in self._temp_dir.listFiles():
+                if file.isFile() and now - file.lastModified() / 1000 > max_age_seconds:
+                    file.delete()
+        except Exception as e:
+            log(f"[Demotivator] Cleanup error: {e}")
+
+    def _get_font(self, size: int):
+        font_index = self.get_setting("font_family", 0)
+        if font_index == 0:
+            return ImageFont.load_default()
+
+        try:
+            font_path = FONT_PATHS[font_index - 1]
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, size)
+        except Exception as e:
+            log(f"[Demotivator] Failed to load font {font_path}: {e}")
+
+        return ImageFont.load_default()
+
+    def create_settings(self):
+        lang = Locale.getDefault().getLanguage()
+        font_names = FONT_NAMES["ru"] if lang.startswith('ru') else FONT_NAMES["en"]
+        return [
+            Header(text=Z("settings_header")),
+            Switch(key="enabled", text=Z("enable_plugin"), icon="input_bot2", default=True),
+            Input(key="title_font_size", text=Z("font_size_title"), icon="media_settings", default="48", subtext="Размер шрифта для основного текста (по умолчанию: 48)"),
+            Input(key="subtitle_font_size", text=Z("font_size_subtitle"), icon="media_settings", default="32", subtext="Размер шрифта для подзаголовка (по умолчанию: 32)"),
+            Selector(key="font_family", text=Z("font_family"), icon="msg_photo_text_regular", default=0, items=font_names),
+            Input(key="border_width", text=Z("border_width"), icon="menu_select_quote", default="20", subtext="Ширина черной рамки в пикселях (по умолчанию: 20)"),
+            Divider(),
+            Text(text=Z("usage_info"), icon="msg_info", on_click=lambda view: self._show_usage_info())
+        ]
+
+    def _show_usage_info(self):
+        try:
+            fragment = get_last_fragment()
+            if not fragment: return
+            context = fragment.getParentActivity()
+            if not context: return
+            
+            builder = AlertDialogBuilder(context, AlertDialogBuilder.ALERT_TYPE_MESSAGE)
+            builder.set_title(Z("usage_info"))
+            builder.set_message(Z("usage_text"))
+            builder.set_positive_button("OK", lambda d, w: d.dismiss())
+            builder.show()
+        except Exception as e:
+            log(f"[Demotivator] Error showing usage info: {e}")
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        if not hasattr(params, "message") or not isinstance(params.message, str): return HookResult()
+        if not self.get_setting("enabled", True): return HookResult()
+        
+        message_text = params.message.strip()
+        if not message_text.startswith(".demot"): return HookResult()
+        
+        if self._processing:
+            run_on_ui_thread(lambda: BulletinHelper.show_error(Z("already_processing")))
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        if not hasattr(params, "replyToMsg") or not params.replyToMsg:
+            run_on_ui_thread(lambda: BulletinHelper.show_error(Z("no_reply")))
+            return HookResult(strategy=HookStrategy.CANCEL)
+        
+        reply_msg = params.replyToMsg
+        if not self._has_photo(reply_msg):
+            run_on_ui_thread(lambda: BulletinHelper.show_error(Z("no_photo")))
+            return HookResult(strategy=HookStrategy.CANCEL)
+        
+        text_parts = message_text[6:].strip()
+        if not text_parts:
+            run_on_ui_thread(lambda: BulletinHelper.show_error(Z("no_text")))
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        run_on_ui_thread(lambda: BulletinHelper.show_info(Z("processing")))
+        threading.Thread(target=self._process_demotivator, args=(params, reply_msg, text_parts), daemon=True).start()
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    def _has_photo(self, message_obj: MessageObject) -> bool:
+        try:
+            if not message_obj or not message_obj.messageOwner: return False
+            media = message_obj.messageOwner.media
+            return isinstance(media, TLRPC.TL_messageMediaPhoto) and media.photo is not None
+        except Exception as e:
+            log(f"[Demotivator] Error checking photo: {e}")
+            return False
+
+    def _process_demotivator(self, params: Any, reply_msg: MessageObject, text: str):
+        self._processing = True
+        try:
+            log("[Demotivator] Starting photo processing...")
+            photo_path = self._get_photo_path(reply_msg)
+            if not photo_path:
+                run_on_ui_thread(lambda: BulletinHelper.show_error(Z("download_error")))
+                return
+
+            log(f"[Demotivator] Photo path: {photo_path}")
+            log("[Demotivator] Creating demotivator...")
+            demotivator_path = self._create_demotivator(photo_path, text)
+            if not demotivator_path:
+                run_on_ui_thread(lambda: BulletinHelper.show_error(Z("create_error")))
+                return
+
+            log(f"[Demotivator] Demotivator created: {demotivator_path}")
+            log("[Demotivator] Sending demotivator...")
+            self._send_demotivator(params, demotivator_path)
+            run_on_ui_thread(lambda: BulletinHelper.show_success(Z("success")))
+        except Exception as e:
+            log(f"[Demotivator] Error processing: {e}\n{traceback.format_exc()}")
+            error_msg = str(e)
+            if "PIL" in error_msg or "Image" in error_msg:
+                run_on_ui_thread(lambda: BulletinHelper.show_error(Z("image_processing_error")))
+            else:
+                run_on_ui_thread(lambda: BulletinHelper.show_error(Z("error", error=error_msg)))
+        finally:
+            self._processing = False
+
+    def _get_photo_path(self, message_obj: MessageObject) -> Optional[str]:
+        try:
+            if not self._has_photo(message_obj):
+                return None
+
+            current_account = UserConfig.selectedAccount
+            file_loader = FileLoader.getInstance(current_account)
+
+            file_path_obj = file_loader.getPathToMessage(message_obj.messageOwner)
+            if file_path_obj:
+                file_path = file_path_obj.getAbsolutePath()
+                log(f"[Demotivator] Expected file path: {file_path}")
+
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    log("[Demotivator] Photo already exists in cache.")
+                    return file_path
+
+            log("[Demotivator] Photo not found in cache, trying to load...")
+            return self._download_photo_sync(message_obj)
+
+        except Exception as e:
+            log(f"[Demotivator] Error in _get_photo_path: {e}\n{traceback.format_exc()}")
+            return None
+
+    def _download_photo_sync(self, message_obj: MessageObject) -> Optional[str]:
+        try:
+            media = message_obj.messageOwner.media
+            if not isinstance(media, TLRPC.TL_messageMediaPhoto):
+                return None
+
+            photo = media.photo
+            if not photo or not photo.sizes:
+                return None
+
+            largest_size = None
+            max_dim = 0
+            for size in photo.sizes:
+                if isinstance(size, TLRPC.TL_photoSize):
+                    dim = max(size.w, size.h)
+                    if dim > max_dim:
+                        max_dim = dim
+                        largest_size = size
+            if not largest_size:
+                largest_size = photo.sizes[-1]
+
+            current_account = UserConfig.selectedAccount
+            file_loader = FileLoader.getInstance(current_account)
+
+            file_path_obj = file_loader.getPathToAttach(largest_size, True)
+            if not file_path_obj:
+                log("[Demotivator] Could not get file path for photo size.")
+                return None
+
+            file_path = file_path_obj.getAbsolutePath()
+
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                log(f"[Demotivator] Photo found at: {file_path}")
+                return file_path
+
+            image_location = ImageLocation.getForPhoto(largest_size, photo)
+            if image_location:
+                log("[Demotivator] Starting photo download...")
+                file_loader.loadFile(image_location, message_obj, "jpg", FileLoader.PRIORITY_HIGH, 1)
+
+                timeout = 30
+                for _ in range(timeout):
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                        log(f"[Demotivator] Photo downloaded successfully: {file_path}")
+                        return file_path
+                    time.sleep(1)
+
+                log("[Demotivator] Photo download timed out.")
+                return None
+            else:
+                log("[Demotivator] Could not create ImageLocation.")
+                return None
+
+        except Exception as e:
+            log(f"[Demotivator] Error in _download_photo_sync: {e}\n{traceback.format_exc()}")
+            return None
+
+    def _create_demotivator(self, photo_path: str, text: str) -> Optional[str]:
+        try:
+            if not os.path.exists(photo_path) or os.path.getsize(photo_path) == 0:
+                log(f"[Demotivator] Photo file invalid: {photo_path}")
+                return None
+
+            title_font_size = int(self.get_setting("title_font_size", "48"))
+            subtitle_font_size = int(self.get_setting("subtitle_font_size", "32"))
+            border_width = int(self.get_setting("border_width", "20"))
+
+            log(f"[Demotivator] Settings: title_font_size={title_font_size}, subtitle_font_size={subtitle_font_size}, border_width={border_width}")
+            
+            lines = text.split('\\n')
+            title = lines[0].strip() if lines else ""
+            subtitle = lines[1].strip() if len(lines) > 1 else ""
+
+            img = Image.open(photo_path).convert("RGB")
+            img_width, img_height = img.size
+            max_img_width = 600
+            if img_width > max_img_width:
+                img = img.resize((max_img_width, int(img_height * max_img_width / img_width)), Image.Resampling.LANCZOS)
+                img_width, img_height = img.size
+
+            inner_border, outer_border = 5, border_width
+            inner_frame_width = img_width + inner_border * 2
+            inner_frame_height = img_height + inner_border * 2
+            canvas_width = inner_frame_width + outer_border * 2
+
+            title_font = self._get_font(title_font_size)
+            subtitle_font = self._get_font(subtitle_font_size)
+
+            temp_canvas = Image.new("RGB", (canvas_width, 1000), "black")
+            temp_draw = ImageDraw.Draw(temp_canvas)
+
+            text_area_height = 40
+
+            if title:
+                title_lines = self._wrap_text(temp_draw, title, title_font, canvas_width - 40)
+                for line in title_lines:
+                    bbox = temp_draw.textbbox((0, 0), line, font=title_font)
+                    line_height = bbox[3] - bbox[1] if bbox[3] > bbox[1] else title_font_size
+                    text_area_height += line_height + max(5, title_font_size // 10)
+
+            if subtitle:
+                if title:
+                    text_area_height += max(10, title_font_size // 5)
+                subtitle_lines = self._wrap_text(temp_draw, subtitle, subtitle_font, canvas_width - 40)
+                for line in subtitle_lines:
+                    bbox = temp_draw.textbbox((0, 0), line, font=subtitle_font)
+                    line_height = bbox[3] - bbox[1] if bbox[3] > bbox[1] else subtitle_font_size
+                    text_area_height += line_height + max(3, subtitle_font_size // 12)
+
+            text_area_height += 40
+            text_area_height = max(text_area_height, 120)
+
+            log(f"[Demotivator] Calculated text area height: {text_area_height}")
+
+            canvas_height = inner_frame_height + outer_border * 2 + text_area_height
+            canvas = Image.new("RGB", (canvas_width, canvas_height), "black")
+            inner_frame = Image.new("RGB", (inner_frame_width, inner_frame_height), "white")
+            inner_frame.paste(img, (inner_border, inner_border))
+            canvas.paste(inner_frame, (outer_border, outer_border))
+
+            draw = ImageDraw.Draw(canvas)
+
+            text_y_start = outer_border + inner_frame_height + 20
+            y_offset = text_y_start
+
+            if title:
+                title_lines = self._wrap_text(draw, title, title_font, canvas_width - 40)
+                for line in title_lines:
+                    bbox = draw.textbbox((0, y_offset), line, font=title_font)
+                    text_x = (canvas_width - (bbox[2] - bbox[0])) // 2
+                    draw.text((text_x, y_offset), line, fill="white", font=title_font)
+                    line_height = bbox[3] - bbox[1] if bbox[3] > bbox[1] else title_font_size
+                    y_offset += line_height + max(5, title_font_size // 10)
+
+            if subtitle:
+                subtitle_y = y_offset + max(10, title_font_size // 5) if title else text_y_start + 40
+                subtitle_lines = self._wrap_text(draw, subtitle, subtitle_font, canvas_width - 40)
+                for line in subtitle_lines:
+                    bbox = draw.textbbox((0, subtitle_y), line, font=subtitle_font)
+                    text_x = (canvas_width - (bbox[2] - bbox[0])) // 2
+                    draw.text((text_x, subtitle_y), line, fill="white", font=subtitle_font)
+                    line_height = bbox[3] - bbox[1] if bbox[3] > bbox[1] else subtitle_font_size
+                    subtitle_y += line_height + max(3, subtitle_font_size // 12)
+
+            output_path = File(self._temp_dir, f"demotivator_{uuid.uuid4()}.png").getAbsolutePath()
+            canvas.save(output_path, "PNG")
+            return output_path
+        except Exception as e:
+            log(f"[Demotivator] Error creating demotivator: {e}\n{traceback.format_exc()}")
+            return None
+
+    def _wrap_text(self, draw, text, font, max_width):
+        words = text.split()
+        if not words: return [""]
+        lines = []
+        current_line = words[0]
+        for word in words[1:]:
+            bbox = draw.textbbox((0, 0), current_line + " " + word, font=font)
+            if (bbox[2] - bbox[0]) <= max_width:
+                current_line += " " + word
+            else:
+                lines.append(current_line)
+                current_line = word
+        lines.append(current_line)
+        return lines
+
+    def _send_demotivator(self, params: Any, demotivator_path: str):
+        try:
+            send_helper = get_send_messages_helper()
+            generated_photo = send_helper.generatePhotoSizes(demotivator_path, None)
+            if not generated_photo:
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось обработать изображение"))
+                return
+            
+            send_message({
+                "peer": params.peer,
+                "photo": generated_photo,
+                "path": demotivator_path,
+                "replyToMsg": params.replyToMsg,
+                "replyToTopMsg": params.replyToTopMsg
+            })
+            self._delete_file_delayed(demotivator_path)
+        except Exception as e:
+            log(f"[Demotivator] Error sending demotivator: {e}")
+            run_on_ui_thread(lambda: BulletinHelper.show_error(Z("send_error", error=e)))
+
+    def _delete_file_delayed(self, path: str, delay: int = 30):
+        def action():
+            try:
+                time.sleep(delay)
+                if os.path.exists(path):
+                    os.remove(path)
+                    log(f"[Demotivator] Deleted temp file: {path}")
+            except Exception as e:
+                log(f"[Demotivator] Error deleting file: {e}")
+        threading.Thread(target=action, daemon=True).start()

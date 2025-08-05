@@ -1,0 +1,1454 @@
+import re
+import traceback
+from enum import Enum
+from abc import ABC, abstractmethod
+from datetime import timedelta, datetime
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Union, Dict, Callable, Any
+
+from ui.bulletin import BulletinHelper
+from ui.alert import AlertDialogBuilder
+from ui.settings import Header, Input, Switch, Divider, Text
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from markdown_utils import parse_markdown
+from android_utils import log as _log, run_on_ui_thread, R
+from client_utils import get_messages_controller, get_last_fragment, send_request, get_user_config, send_message, run_on_queue
+
+from java import cast, jint, dynamic_proxy
+from java.util import ArrayList, Locale
+from org.telegram.tgnet import TLRPC
+from org.telegram.ui import ChatRightsEditActivity
+from org.telegram.messenger import ChatObject, MessagesController
+
+__name__ = "AdminTools"
+__description__ = "Lots of useful commands for the administrator (more details in the settings) (requires zwylib)"
+__icon__ = "zwyPluginsIcons/4"
+__id__ = "zwyAdminTools"
+__version__ = "1.1.3 (1)"
+__author__ = "@zwylair"
+__min_version__ = "11.9.1"
+
+
+class ErrorDelegate(dynamic_proxy(MessagesController.ErrorDelegate)):
+    def __init__(self, fn: Callable[[TLRPC.TL_error], bool]):
+        super().__init__()
+        self._fn = fn
+
+    def run(self, error: TLRPC.TL_error) -> bool:
+        try:
+            return self._fn(error)
+        except Exception:
+            log(f"Error in Callback1: {traceback.format_exc().rstrip()}")
+            return True
+
+
+class TimeUtils:
+    @staticmethod
+    def seconds_from_custom_string(duration_str: str) -> int:
+        pattern = re.compile(r'(\d+)(mo|[wdhms])')
+        duration = timedelta()
+
+        for match in pattern.finditer(duration_str):
+            value = int(match.group(1))
+            unit = match.group(2)
+
+            if unit == 'mo': duration += timedelta(days=30 * value)
+            elif unit == 'w': duration += timedelta(weeks=value)
+            elif unit == 'd': duration += timedelta(days=value)
+            elif unit == 'h': duration += timedelta(hours=value)
+            elif unit == 'm': duration += timedelta(minutes=value)
+            elif unit == 's': duration += timedelta(seconds=value)
+            else: raise ValueError(f"Unknown time unit: {unit}")
+
+        return int(duration.total_seconds())
+
+    @staticmethod
+    def normalize_time(duration_seconds: int, show_bulletins = True) -> int:
+        min_time = 35
+        max_time = 86400 * 365
+
+        if duration_seconds < min_time:
+            if show_bulletins:
+                show_info_bulletin(localise("min_restriction_time_info"))
+            return min_time
+        elif duration_seconds >= max_time:
+            if show_bulletins:
+                show_info_bulletin(localise("max_restriction_time_info"))
+            return max_time
+        else:
+            return duration_seconds
+
+    @staticmethod
+    def get_pretty_time_string(timestamp: int) -> str:
+        days = timestamp // 86400
+        hours = (timestamp % 86400) // 3600
+        minutes = (timestamp % 3600) // 60
+        seconds = timestamp % 60
+
+        parts = []
+        if days > 0: parts.append(f"{days} " + localise("days"))
+        if hours > 0: parts.append(f"{hours} " + localise("hours"))
+        if minutes > 0: parts.append(f"{minutes} " + localise("minutes"))
+        if seconds > 0: parts.append(f"{seconds} " + localise("seconds"))
+
+        return ", ".join(parts)
+
+    @staticmethod
+    def get_date_string(date: datetime, swap_day_and_month: bool, add_seconds: bool) -> str:
+        date_parts = (
+            "%m/%d/%Y" if swap_day_and_month else "%d/%m/%Y",
+            ", ",
+            "%H:%M" + (":%S" if add_seconds else "")
+        )
+        return date.strftime("".join(date_parts))
+
+    @staticmethod
+    def get_unix_timestamp(offset: timedelta = None) -> int:
+        return int((datetime.now() if offset is None else datetime.now() + offset).timestamp())
+
+
+class UserUtils:
+    @staticmethod
+    def get_user(user: Union[int, str]) -> Optional[TLRPC.User]:
+        return get_messages_controller().getUser(user)
+
+    @staticmethod
+    def is_admin(chat_id: int, user_id: int) -> bool:
+        return get_messages_controller().getAdminInChannel(user_id, chat_id) is not None
+
+    @staticmethod
+    def get_user_mention(user: TLRPC.User) -> str:
+        return f"@{user.username}" if user.username else f"[{user.first_name}](tg://user?id={user.id})"
+
+    @staticmethod
+    def has_admin_permissions(chat_id: Union[int, TLRPC.Chat]) -> bool:
+        rights = get_chat(chat_id).admin_rights
+        return rights.delete_messages and rights.ban_users if rights else False
+
+    @staticmethod
+    def can_send_messages(chat_id: Union[int, TLRPC.Chat]) -> bool:
+        return ChatObject.canSendMessages(get_chat(chat_id))
+
+
+class CommandUtils:
+    @staticmethod
+    def has_silent_tag(message_text: str) -> bool:
+        silent_tags = ("s", "sd", "ds")
+        return message_text[len(prefix):].startswith(silent_tags)
+
+    @staticmethod
+    def has_delete_tag(message_text: str) -> bool:
+        delete_tags = ("d", "sd", "ds")
+        return message_text[len(prefix):].startswith(delete_tags)
+
+    @staticmethod
+    def parse_user(params, message_parts: List[str]) -> Optional[TLRPC.User]:
+        raw_user: Union[int, str, None] = None
+
+        log("Trying to parse user...")
+
+        if params.replyToMsg is not None:
+            raw_user: int = params.replyToMsg.messageOwner.from_id.user_id
+            log(f"User (raw: {raw_user}) was parsed from the reply")
+        elif len(message_parts) >= 1:
+            raw_user = message_parts[0]
+            if raw_user.startswith("@"):
+                log(f"User (raw: {raw_user}) was parsed from given @username")
+                raw_user: str = raw_user.lstrip("@")
+                message_parts.pop(0)
+            elif raw_user.isdigit():
+                log(f"User (raw: {raw_user}) was parsed from given ID")
+                raw_user = int(raw_user)
+                message_parts.pop(0)
+
+        if raw_user is None:
+            log("Failed to parse user (raw: None) (has not been specified)")
+            show_error_bulletin(localise("user_has_not_been_specified"))
+            return None
+
+        target_user = get_messages_controller().getUser(raw_user)
+        if target_user is None:
+            log(f"Failed to parse user (raw: {raw_user}) (has not found)")
+            show_error_bulletin(localise("user_was_not_found"))
+            return None
+
+        log(f"Parsed user id: {target_user.id}")
+        return target_user
+
+    @staticmethod
+    def parse_time(message_parts: List[str], normalize = True) -> int:
+        log("Trying to parse time...")
+
+        if len(message_parts) == 0:
+            log("message_parts is empty")
+            return 0
+
+        raw_time = message_parts[0]
+        time_seconds = TimeUtils.seconds_from_custom_string(raw_time)
+
+        if time_seconds != 0:  # raw_time is "1w2d"-like string
+            message_parts.pop(0)
+            parsed_time = TimeUtils.normalize_time(time_seconds) if normalize else time_seconds
+            log(f"Parsed time = {parsed_time}")
+            return parsed_time
+
+        log(f"Time string ({message_parts[0]}) is incorrect")
+        return 0
+
+    @staticmethod
+    def parse_reason(message_parts: List[str]) -> Optional[str]:
+        log("Trying to parse reason...")
+        reason = " ".join(message_parts) if message_parts else None
+        log(f"Parsed reason: {reason}")
+        return reason
+
+    @staticmethod
+    def refresh_prefix():
+        global prefix
+        prefix = DEFAULT_PREFIX if setting_getter is None else setting_getter("prefix", DEFAULT_PREFIX)
+        log("Prefix has been refreshed")
+
+
+@dataclass
+class Warn:
+    timestamp: int
+    reason: Optional[str] = None
+
+
+class WarnController:
+    @staticmethod
+    def get_chat_warns(chat_id: int) -> Dict[int, List[Dict]]:
+        return warns_cache.content.get(chat_id, {})
+
+    @staticmethod
+    def get_user_warns(chat_id: int, user_id: int) -> List[Warn]:
+        chat_warns = WarnController.get_chat_warns(chat_id)
+        user_warns = chat_warns.get(user_id, [])
+        user_warns = [Warn(**i) for i in user_warns]  # List[Dict (serialized Warn)] -> List[Warn]
+        return user_warns
+
+    @staticmethod
+    def dump_chat_warns(chat_id: int, dump_data: Dict[int, List[Dict]]):
+        warns_data = warns_cache.content
+        warns_data[chat_id] = dump_data
+        warns_cache.write()
+
+    # noinspection PyTypeChecker
+    @staticmethod
+    def dump_user_warns(chat_id: int, user_id: int, warns: List[Warn]):
+        chat_warns = WarnController.get_chat_warns(chat_id)
+        user_warns = [asdict(i) for i in warns]  # Warn -> Dict (serialized Warn)
+        chat_warns[user_id] = user_warns
+        WarnController.dump_chat_warns(chat_id, chat_warns)
+
+    @staticmethod
+    def add_user_warn(chat_id: int, user_id: int, warn: Warn):
+        user_warns = WarnController.get_user_warns(chat_id, user_id)
+        user_warns.append(warn)
+        WarnController.dump_user_warns(chat_id, user_id, user_warns)
+
+    @staticmethod
+    def remove_last_user_warn(chat_id: int, user_id: int):
+        user_warns = WarnController.get_user_warns(chat_id, user_id)
+        user_warns.pop()
+        WarnController.dump_user_warns(chat_id, user_id, user_warns)
+
+    @staticmethod
+    def clear_user_warns(chat_id: int, user_id: int):
+        WarnController.dump_user_warns(chat_id, user_id, [])
+
+
+class CommandResult(Enum):
+    SUCCESS = 0
+    FAILED = 1
+    PASS = 2
+
+
+class BaseCommandsEnum(Enum):
+    @classmethod
+    def from_str(cls, value: str) -> "BaseCommandsEnum":
+        try:
+            return cls(value)
+        except ValueError:
+            raise ValueError(f"Unknown command: {value!r}")
+
+    def to_str(self) -> str:
+        return self.value
+
+
+class BaseCommands(ABC):
+    @classmethod
+    @abstractmethod
+    def parse_command(cls, message_parts: List[str]) -> Optional[BaseCommandsEnum]:
+        pass
+
+    @classmethod
+    @abstractmethod
+    def execute_command(cls, params, action: BaseCommandsEnum, message_parts: List[str]) -> CommandResult:
+        pass
+
+
+class RestrictCommands(BaseCommands):
+    class Commands(BaseCommandsEnum):
+        BAN = "ban"
+        KICK = "kick"
+        MUTE = "mute"
+        UNMUTE = "unmute"
+        UNBAN = "unban"
+        FBAN = "fban"
+        FUNBAN = "funban"
+
+    @classmethod
+    def parse_command(cls, message_parts: List[str]) -> Optional[Commands]:
+        raw_action = message_parts[0]
+        action = raw_action[len(prefix):].lstrip("sd")
+        valid_actions = tuple(cmd.to_str() for cmd in cls.Commands)
+
+        if action not in valid_actions:
+            return None
+
+        action = cls.Commands.from_str(action)
+        message_parts.pop(0)
+        return action
+
+    @classmethod
+    def execute_command(cls, params, action: Commands, message_parts: List[str]):
+        my_uid = get_user_config().clientUserId
+        message_text = params.message
+        hook_result = HookResult(strategy=HookStrategy.CANCEL)
+        chat_id = -params.peer
+
+        target_user = CommandUtils.parse_user(params, message_parts)
+        if target_user is None:
+            return hook_result
+
+        log(f"My UID: {my_uid}")
+        if target_user.id == my_uid:
+            log("Failed to execute command (parsed user is me)")
+            show_error_bulletin(localise("tried_to_restrict_myself"))
+            return hook_result
+
+        if UserUtils.is_admin(chat_id, target_user.id):
+            log("Failed to execute command (parsed user is admin)")
+            show_error_bulletin(localise("tried_to_restrict_admins"))
+            return hook_result
+
+        time_seconds = CommandUtils.parse_time(message_parts)
+        reason = CommandUtils.parse_reason(message_parts)
+        is_silent = CommandUtils.has_silent_tag(message_text)
+        is_delete = CommandUtils.has_delete_tag(message_text)
+
+        log(" ".join((
+            f"{cls.__name__} Executing action: {action};",
+            f"time: {TimeUtils.get_pretty_time_string(time_seconds) if time_seconds > 0 else 'None'};",
+            f"reason: {reason};",
+            ("(silent)" if is_silent else ""),
+            ("(delete)" if is_delete else "")
+        )).strip())
+
+        action_result = cls._execute_action(action, chat_id, target_user, time_seconds, reason)
+        if action_result != CommandResult.SUCCESS:
+            log(f"Action was not successful ({action_result})")
+            return hook_result
+
+        if not is_silent:
+            message_string = localise("restriction_message").format(
+                action=localise(action.to_str()),
+                user=UserUtils.get_user_mention(target_user)
+            )
+
+            if cls._is_command_timed(action) and time_seconds > 0:  # time was specified
+                date_instead_of_time: bool = setting_getter("date_instead_of_time", DEFAULT_DATE_INSTEAD_OF_TIME)
+                swap_day_and_month: bool = setting_getter("swap_day_and_month", DEFAULT_SWAP_DAY_AND_MONTH)
+                add_seconds: bool = setting_getter("add_seconds_to_date", DEFAULT_ADD_SECONDS_TO_DATE)
+
+                if date_instead_of_time:
+                    time_string = localise("restriction_date_addition")
+                    formatted_time = TimeUtils.get_date_string(
+                        date=datetime.now() + timedelta(seconds=time_seconds),
+                        swap_day_and_month=swap_day_and_month,
+                        add_seconds=add_seconds
+                    )
+                else:
+                    time_string = localise("restriction_time_addition")
+                    formatted_time = TimeUtils.get_pretty_time_string(time_seconds)
+
+                time_string = time_string.format(time=formatted_time)
+                message_string = message_string.rstrip(".")
+                message_string += " " + time_string
+
+            if reason is not None:
+                reason_string = localise("restriction_reason_addition")
+                reason_string = reason_string.format(reason=reason)
+                message_string += " " + reason_string
+
+            new_message = parse_markdown(message_string)
+            params.message = new_message.text
+            for i in new_message.entities:
+                params.entities.add(i.to_tlrpc_object())
+
+            hook_result = HookResult(strategy=HookStrategy.MODIFY_FINAL, params=params)
+
+        if is_delete and params.replyToMsg is not None:
+            reply_message = params.replyToMsg.messageOwner
+            delete_message([reply_message.id], -chat_id, reply_message.quick_reply_shortcut_id)
+            params.replyToMsg = None
+
+        return hook_result
+
+    @classmethod
+    def _is_command_timed(cls, command: Commands) -> bool:
+        commands = cls.Commands
+        return command not in (commands.KICK, commands.UNBAN, commands.UNMUTE, commands.FBAN, commands.FUNBAN)
+
+    @staticmethod
+    def _verify_fed_chat(raw_fed_chat_id: str) -> bool:
+        if not raw_fed_chat_id:
+            log("Fed chat ID is not specified")
+            show_error_bulletin(localise("unset_fed_chat"))
+            return False
+
+        fed_chat_id = normalize_chat_id(raw_fed_chat_id)
+        if fed_chat_id is None:
+            log("Fed chat ID is incorrect")
+            show_error_bulletin(localise("incorrect_fed_chat"))
+            return False
+
+        fed_chat = get_chat(fed_chat_id)
+        if fed_chat is None:
+            log("Fed chat was not found")
+            show_error_bulletin(localise("fed_chat_was_not_found"))
+            return False
+
+        if not UserUtils.can_send_messages(fed_chat):
+            log("Cannot send messages in fed chat")
+            show_error_bulletin(localise("cannot_send_msgs_in_fed_chat"))
+            return False
+        return True
+
+    @classmethod
+    def _execute_action(cls, action: Commands, chat_id: int, target_user: TLRPC.User, time_seconds: int, reason: str) -> CommandResult:
+        cmds = cls.Commands
+        new_rights = TLRPC.TL_chatBannedRights()
+        new_rights.until_date = TimeUtils.get_unix_timestamp(offset=timedelta(seconds=time_seconds))
+
+        if action == cmds.KICK:
+            get_messages_controller().deleteParticipantFromChat(chat_id, target_user)
+            send_unban_request(chat_id, target_user.id, delay=1)
+        elif action == cmds.BAN:
+            get_messages_controller().deleteParticipantFromChat(chat_id, target_user)
+        elif action == cmds.MUTE:
+            for attr in dir(new_rights):
+                if attr.startswith("send_"):
+                    setattr(new_rights, attr, True)
+            get_messages_controller().setParticipantBannedRole(chat_id, target_user, get_chat(chat_id), new_rights, False, get_last_fragment())
+        elif action == cmds.UNMUTE:
+            get_messages_controller().setParticipantBannedRole(chat_id, target_user, get_chat(chat_id), TLRPC.TL_chatBannedRights(), False, get_last_fragment())
+        elif action == cmds.UNBAN:
+            send_unban_request(chat_id, target_user.id)
+        elif action == cmds.FBAN:
+            raw_fed_chat_id: str = setting_getter("fed_chat_id", DEFAULT_FED_CHAT)
+            if not cls._verify_fed_chat(raw_fed_chat_id):
+                return CommandResult.FAILED
+
+            message = f"/fban {target_user.id}"
+            message += ("" if reason is None else f" {reason}")
+
+            send_message({"peer": -normalize_chat_id(raw_fed_chat_id), "message": message})
+            cls._execute_action(cmds.BAN, chat_id, target_user, time_seconds, reason)
+        elif action == cmds.FUNBAN:
+            raw_fed_chat_id: str = setting_getter("fed_chat_id", DEFAULT_FED_CHAT)
+            if not cls._verify_fed_chat(raw_fed_chat_id):
+                return CommandResult.FAILED
+
+            message = f"/funban {target_user.id}"
+            message += ("" if reason is None else f" {reason}")
+
+            send_message({"peer": -normalize_chat_id(raw_fed_chat_id), "message": message})
+            cls._execute_action(cmds.UNBAN, chat_id, target_user, time_seconds, reason)
+        else:
+            return CommandResult.PASS
+        return CommandResult.SUCCESS
+
+
+class AdminCommands(BaseCommands):
+    class Commands(BaseCommandsEnum):
+        SLOWMODE = "slowmode"
+        PROMOTE = "promote"
+        DEMOTE = "demote"
+        WARN = "warn"
+        UNWARN = "unwarn"
+        WARNS = "warns"
+
+    @classmethod
+    def parse_command(cls, message_parts: List[str]) -> Optional[Commands]:
+        raw_action = message_parts[0]
+
+        action = raw_action[len(prefix):]
+        valid_actions = tuple(cmd.to_str() for cmd in cls.Commands)
+
+        if not action.startswith(valid_actions):
+            return None
+
+        message_parts.pop(0)
+        return cls.Commands.from_str(action)
+
+    @classmethod
+    def execute_command(cls, params, action: Commands, message_parts: List[str]):
+        log(f"{cls.__name__} Executing action: {action}")
+
+        action_result = {
+            cls.Commands.SLOWMODE: cls._execute_slowmode,
+            cls.Commands.PROMOTE: cls._execute_promote,
+            cls.Commands.DEMOTE: cls._execute_demote,
+            cls.Commands.WARN: cls._execute_warn,
+            cls.Commands.UNWARN: cls._execute_unwarn,
+            cls.Commands.WARNS: cls._execute_warns,
+        }.get(action)(params, message_parts)
+
+        if action_result == CommandResult.PASS:
+            log("Action has been passed")
+            return HookResult(strategy=HookStrategy.CANCEL)
+        elif action_result == CommandResult.FAILED:
+            log("Action has been failed")
+            return HookResult(strategy=HookStrategy.CANCEL)
+        return HookResult(strategy=HookStrategy.MODIFY_FINAL, params=params)
+
+    @staticmethod
+    def _execute_slowmode(params, message_parts: List[str]) -> CommandResult:
+        time_seconds = CommandUtils.parse_time(message_parts, normalize=False)
+        valid_seconds = (0, 10, 30, 60, 60 * 5, 60 * 15, 60 * 60)
+        nearest_valid = min(valid_seconds, key=lambda x: abs(x - time_seconds))
+
+        if time_seconds != nearest_valid:
+            show_info_bulletin(localise("slowmode_value_warn"))
+            time_seconds = nearest_valid
+
+        if time_seconds == 0:
+            params.message = localise("slowmode_disabled")
+        else:
+            params.message = localise("slowmode_has_been_set").format(time=TimeUtils.get_pretty_time_string(time_seconds))
+
+        send_change_slowmode_request(time_seconds, -params.peer)
+        return CommandResult.SUCCESS
+
+    @staticmethod
+    def _execute_promote(params, message_parts: List[str]) -> CommandResult:
+        target_user = CommandUtils.parse_user(params, message_parts)
+
+        if target_user is None:
+            return CommandResult.FAILED
+
+        if target_user.id == get_user_config().clientUserId:
+            log("Failed to execute command (parsed user is me)")
+            show_error_bulletin(localise("cannot_promote_myself"))
+            return CommandResult.FAILED
+
+        fragment = ChatRightsEditActivity(target_user.id, -params.peer, None, None, None, None, 0, True, False, None)
+        get_last_fragment().presentFragment(fragment, True)
+
+        return CommandResult.PASS
+
+    @staticmethod
+    def _execute_demote(params, message_parts: List[str]) -> CommandResult:
+        def on_success():
+            show_success_bulletin(localise("successful_demote"))
+
+        def on_error(error: TLRPC.TL_error):
+            show_error_bulletin(error.text)
+            return False
+
+        target_user = CommandUtils.parse_user(params, message_parts)
+
+        if target_user is None:
+            return CommandResult.FAILED
+
+        if target_user.id == get_user_config().clientUserId:
+            log("Failed to execute command (parsed user is me)")
+            show_error_bulletin(localise("cannot_demote_myself"))
+            return CommandResult.FAILED
+
+        get_messages_controller().setUserAdminRole(
+            -params.peer,
+            target_user,
+            TLRPC.TL_chatAdminRights(),
+            "",
+            False,
+            get_last_fragment(),
+            False,
+            False,
+            None,
+            R(on_success),
+            ErrorDelegate(on_error)
+        )
+
+        return CommandResult.PASS
+
+    @staticmethod
+    def _execute_warn(params, message_parts: List[str]) -> CommandResult:
+        target_user = CommandUtils.parse_user(params, message_parts)
+        chat_id = -params.peer
+
+        if target_user is None or not is_warn_command_available(target_user, chat_id):
+            return CommandResult.FAILED
+
+        max_warns_count = setting_getter("max_warns_until_punish", DEFAULT_MAX_WARNS_UNTIL_PUNISH)
+        punish_action = setting_getter("warns_punish_action", DEFAULT_MAX_WARNS_PUNISH)
+        punish_duration = setting_getter("warns_punish_duration", DEFAULT_PUNISH_DURATION)
+
+        try:
+            max_warns_count = int(max_warns_count)
+        except ValueError:
+            max_warns_count = int(DEFAULT_MAX_WARNS_UNTIL_PUNISH)
+
+        try:
+            punish_action = RestrictCommands.Commands.from_str(punish_action)
+        except ValueError:
+            punish_action = RestrictCommands.Commands.from_str(DEFAULT_MAX_WARNS_PUNISH)
+
+        warn_controller = WarnController
+        warns = warn_controller.get_user_warns(chat_id, target_user.id)
+        new_warn = Warn(TimeUtils.get_unix_timestamp(), CommandUtils.parse_reason(message_parts))
+        new_warns_count = len(warns) + 1
+
+        if new_warns_count >= max_warns_count:
+            warn_controller.clear_user_warns(chat_id, target_user.id)
+            RestrictCommands.execute_command(
+                params,
+                punish_action,
+                ([] if params.replyToMsg is not None else [str(target_user.id)]) +
+                [punish_duration, *message_parts, localise("max_warns_count_hint")]
+            )
+        else:
+            warn_controller.add_user_warn(chat_id, target_user.id, new_warn)
+
+            reason = CommandUtils.parse_reason(message_parts)
+            message_string = localise("warn_message").format(
+                user=UserUtils.get_user_mention(target_user),
+                warns_count=f"{new_warns_count}/{max_warns_count}"
+            )
+
+            if reason is not None:
+                message_string += " " + localise("restriction_reason_addition").format(reason=reason)
+
+            parsed = parse_markdown(message_string)
+            params.message = parsed.text
+            for i in parsed.entities:
+                params.entities.add(i.to_tlrpc_object())
+        return CommandResult.SUCCESS
+
+    @staticmethod
+    def _execute_unwarn(params, message_parts: List[str]) -> CommandResult:
+        target_user = CommandUtils.parse_user(params, message_parts)
+        chat_id = -params.peer
+
+        if target_user is None or not is_warn_command_available(target_user, chat_id):
+            return CommandResult.FAILED
+
+        warn_controller = WarnController
+        warns_count = len(warn_controller.get_user_warns(chat_id, target_user.id))
+        max_warns_count = setting_getter("max_warns_until_punish", DEFAULT_MAX_WARNS_UNTIL_PUNISH)
+
+        try:
+            max_warns_count = int(max_warns_count)
+        except ValueError:
+            max_warns_count = int(DEFAULT_MAX_WARNS_UNTIL_PUNISH)
+
+        if warns_count == 0:
+            show_error_bulletin(localise("no_warns_to_unwarn"))
+            return CommandResult.PASS
+        else:
+            WarnController.remove_last_user_warn(chat_id, target_user.id)
+
+            reason = CommandUtils.parse_reason(message_parts)
+            message_string = localise("unwarn_message").format(
+                user=UserUtils.get_user_mention(target_user),
+                warns_count=f"{warns_count - 1}/{max_warns_count}"
+            )
+
+            if reason is not None:
+                message_string += " " + localise("restriction_reason_addition").format(reason=reason)
+
+            parsed = parse_markdown(message_string)
+            params.message = parsed.text
+            for i in parsed.entities:
+                params.entities.add(i.to_tlrpc_object())
+        return CommandResult.SUCCESS
+
+    @staticmethod
+    def _execute_warns(params, message_parts: List[str]) -> CommandResult:
+        target_user = CommandUtils.parse_user(params, message_parts)
+        chat_id = -params.peer
+
+        if target_user is None or not is_warn_command_available(target_user, chat_id):
+            return CommandResult.FAILED
+
+        warn_controller = WarnController
+        warns = warn_controller.get_user_warns(chat_id, target_user.id)
+        max_warns_count = setting_getter("max_warns_until_punish", DEFAULT_MAX_WARNS_UNTIL_PUNISH)
+
+        try:
+            max_warns_count = int(max_warns_count)
+        except ValueError:
+            max_warns_count = int(DEFAULT_MAX_WARNS_UNTIL_PUNISH)
+
+        message_string = localise("user_warns").format(
+            user=UserUtils.get_user_mention(target_user),
+            warns_count=f"{len(warns)}/{max_warns_count}"
+        )
+
+        swap_day_and_month: bool = setting_getter("swap_day_and_month", DEFAULT_SWAP_DAY_AND_MONTH)
+        add_seconds: bool = setting_getter("add_seconds_to_date", DEFAULT_ADD_SECONDS_TO_DATE)
+
+        for index, warn in enumerate(warns):
+            formatted_time = TimeUtils.get_date_string(
+                date=datetime.fromtimestamp(warn.timestamp),
+                swap_day_and_month=swap_day_and_month,
+                add_seconds=add_seconds
+            )
+
+            message_string += localise("warn_info").format(
+                index=index + 1,
+                max_count=max_warns_count,
+                date=formatted_time,
+                reason=warn.reason
+            )
+
+        parsed = parse_markdown(message_string)
+        params.message = parsed.text
+        for i in parsed.entities:
+            params.entities.add(i.to_tlrpc_object())
+        return CommandResult.SUCCESS
+
+
+class Locales:
+    default = {
+        "min_restriction_time_info": "Min restrict. time is 35s (infinite otherwise)",
+        "max_restriction_time_info": "Max restrict. time is 365d (infinite otherwise)",
+        "user_has_not_been_specified": "User has not been specified (ID, @username or reply)",
+        "user_was_not_found": "Specified user was not found",
+        "tried_to_restrict_myself": "What a weird attempt at harakiri bruh",
+        "tried_to_restrict_admins": "Cannot restrict admins!",
+        "restriction_message": "{user} has been {action}.",
+        "restriction_time_addition": "for {time}.",
+        "restriction_date_addition": "until {time}.",
+        "restriction_reason_addition": "Reason: {reason}.",
+        "ban": "banned",
+        "fban": "banned in federation",
+        "funban": "unbanned in federation",
+        "kick": "kicked",
+        "mute": "muted",
+        "unmute": "unmuted",
+        "unban": "unbanned",
+        "unset_fed_chat": "Fed chat ID is not set! Set it in plugin preferences.",
+        "incorrect_fed_chat": "Fed chat ID is incorrect!",
+        "fed_chat_was_not_found": "Fed chat was not found!",
+        "cannot_send_msgs_in_fed_chat": "Cannot send messages in fed chat!",
+        "slowmode_value_warn": "Slowmode can only be set with time values from the group settings",
+        "slowmode_disabled": "Slowmode has been disabled.",
+        "slowmode_has_been_set": "Slowmode has been set to {time}.",
+        "cannot_promote_myself": "Cannot promote myself",
+        "successful_demote": "User has been successfully demoted!",
+        "cannot_demote_myself": "Cannot demote myself",
+        "max_warns_count_hint": "(max warns count reached)",
+        "warn_message": "{user} has been warned ({warns_count}).",
+        "no_warns_to_unwarn": "No warns to unwarn!",
+        "unwarn_message": "{user} has been unwarned ({warns_count}).",
+        "user_warns": "{user} warns: ({warns_count}):\n",
+        "warn_info": (
+            "\n"
+            "Warn {index}/{max_count}:\n"
+            "  Date: `{date}`\n"
+            "  Reason: `{reason}`"
+            "\n"
+        ),
+        "admins_cannot_be_warned": "Admins cannot have warns!",
+        "cannot_warn_myself": "You cannot have warn!",
+        "cannot_execute_without_zwylib": "Cannot execute this command without ZwyLib!",
+        "zwylib_was_not_found": "ZwyLib plugin required for this plugin is not found!",
+        "settings_usage": "Usage",
+        "settings_commands": "Commands",
+        "settings_actions": "Actions",
+        "action": "action",
+        "user_inline_arg": "id | username | reply",
+        "time_inline_arg": "time",
+        "reason_inline_arg": "reason",
+        "required_arg": "required",
+        "optional_arg": "optional",
+        "settings_examples": "Examples",
+        "settings_reply": "(reply)",
+        "settings_other_header": "Other",
+        "settings_fed_chat_id_label": "Fed chat ID",
+        "settings_command_prefix_label": "Command prefix",
+        "settings_max_warns_until_punish_label": "Warns count until punish",
+        "settings_warns_punish_action_label": "Punish after reaching this count",
+        "settings_punish_duration_label": "Punish duration",
+        "settings_punish_duration_hint": "1w2d-like time",
+        "settings_time_formatting_header": "Time formatting",
+        "settings_date_instead_of_time_label": "Date instead of time amount",
+        "settings_date_instead_of_time_hint": "dd/mm/YYYY HH:MM instead of N days",
+        "settings_swap_day_and_month_label": "Swap day and month",
+        "settings_swap_day_and_month_hint": "mm/dd/YYYY instead of dd/mm/YYYY",
+        "settings_add_seconds_to_date_label": "Add seconds to date",
+        "settings_add_seconds_to_date_hint": "HH:MM:SS instead of HH:MM",
+        "settings_dev_header": "Dev",
+        "settings_debug_mode_label": "Debug mode",
+        "settings_debug_mode_hint": "Logs various debug info",
+        "settings_disable_autoupdate_hint": "To prevent rolling back to the stable version during debugging",
+        "settings_generation_error": "An exception occurred on",
+        "have_no_permissions": "Have no permissions to restrict users!",
+        "cannot_use_command_in_dialogs": "Cannot use this command in dialogs",
+        "cannot_use_command_in_channels": "Cannot use this command in channels",
+        "general_exception_message": "An exception occurred",
+        "days": "days",
+        "hours": "hours",
+        "minutes": "minutes",
+        "seconds": "seconds",
+        "settings_warns_header": "Warns",
+        "settings_restrict_cmds_usage_header": "How to use restrict commands?",
+        "settings_restrict_cmds_usage_hint": "Note the fed chat ID must be set to use the fban and funban actions.",
+        "settings_admin_cmds_usage_header": "How to use admin commands?",
+        "info_popup_title": "Usage hint",
+        "alert_close_button_text": "Close",
+        "disable_autoupdate_label": "Disable autoupdate"
+    }
+    ru = {
+        "min_restriction_time_info": "Мин. время ограничения — 35с (иначе бесконечно)",
+        "max_restriction_time_info": "Макс. время ограничения — 365д (иначе бесконечно)",
+        "user_has_not_been_specified": "Пользователь не указан (ID, @username или ответ)",
+        "user_was_not_found": "Пользователь не найден",
+        "tried_to_restrict_myself": "Такая себе попытка харакири, братанчик",
+        "tried_to_restrict_admins": "Нельзя ограничивать админов!",
+        "restriction_message": "{user} был(а) {action}.",
+        "restriction_time_addition": "на {time}.",
+        "restriction_date_addition": "до {time}.",
+        "restriction_reason_addition": "Причина: {reason}.",
+        "ban": "забанен",
+        "fban": "забанен в федерации",
+        "funban": "разбанен в федерации",
+        "kick": "кикнут",
+        "mute": "замьючен",
+        "unmute": "размьючен",
+        "unban": "разбанен",
+        "unset_fed_chat": "ID фед-чата не задан! Установите его в настройках!",
+        "incorrect_fed_chat": "Некорректный ID фед-чата!",
+        "fed_chat_was_not_found": "Фед-чат не найден!",
+        "cannot_send_msgs_in_fed_chat": "Невозможно отправить сообщение в фед-чате!",
+        "slowmode_value_warn": "Слоумод можно поставить только с временем из настроек группы",
+        "slowmode_disabled": "Слоумод отключён.",
+        "slowmode_has_been_set": "Слоумод установлен на {time}.",
+        "cannot_promote_myself": "Нельзя дать админку самому себе",
+        "successful_demote": "У пользователь успешно отобрана админка!",
+        "cannot_demote_myself": "Нельзя снять админку с самого себя",
+        "max_warns_count_hint": "(достигнуто макс. количество предупреждений)",
+        "warn_message": "{user} получил предупреждение ({warns_count}).",
+        "no_warns_to_unwarn": "Нет предупреждений для снятия!",
+        "unwarn_message": "{user} снято предупреждение ({warns_count}).",
+        "user_warns": "Предупреждения для {user} ({warns_count}):\n",
+        "warn_info": (
+            "\n"
+            "Предупреждение {index}/{max_count}:\n"
+            "  Дата: `{date}`\n"
+            "  Причина: `{reason}`"
+            "\n"
+        ),
+        "admins_cannot_be_warned": "Админам нельзя выдавать предупреждения!",
+        "cannot_warn_myself": "Нельзя предупредить самого себя!",
+        "cannot_execute_without_zwylib": "Невозможно выполнить команду без ZwyLib!",
+        "zwylib_was_not_found": "Требуемый плагин ZwyLib не найден!",
+        "settings_usage": "Использование",
+        "settings_commands": "Команды",
+        "settings_actions": "Действия",
+        "action": "действие",
+        "user_inline_arg": "ID | юзерка | ответ",
+        "time_inline_arg": "время",
+        "reason_inline_arg": "причина",
+        "required_arg": "обязательно",
+        "optional_arg": "необязательно",
+        "settings_examples": "Примеры",
+        "settings_reply": "(ответ)",
+        "settings_other_header": "Другое",
+        "settings_fed_chat_id_label": "ID фед-чата",
+        "settings_command_prefix_label": "Префикс команд",
+        "settings_max_warns_until_punish_label": "Кол-во пред. до наказания",
+        "settings_warns_punish_action_label": "Наказание при достиж. лимита",
+        "settings_punish_duration_label": "Длительность наказания",
+        "settings_punish_duration_hint": "время вида 1w2d",
+        "settings_time_formatting_header": "Формат времени",
+        "settings_date_instead_of_time_label": "Дата вместо кол-ва времени",
+        "settings_date_instead_of_time_hint": "дд/мм/ГГГГ ЧЧ:ММ вместо N дней",
+        "settings_swap_day_and_month_label": "Поменять день и месяц",
+        "settings_swap_day_and_month_hint": "мм/дд/ГГГГ вместо дд/мм/ГГГГ",
+        "settings_add_seconds_to_date_label": "Добавить секунды к дате",
+        "settings_add_seconds_to_date_hint": "ЧЧ:ММ:СС вместо ЧЧ:ММ",
+        "settings_dev_header": "Разработчиковское",
+        "settings_debug_mode_label": "Режим отладки",
+        "settings_debug_mode_hint": "Логирует отладочную информацию",
+        "settings_disable_autoupdate_hint": "Чтобы не произошло откатывание к стабильной версии при отладке",
+        "settings_generation_error": "Вылезла ошибка в",
+        "have_no_permissions": "Нет прав для ограничения пользователей!",
+        "cannot_use_command_in_dialogs": "Эта команда недоступна в диалогах",
+        "cannot_use_command_in_channels": "Эта команда недоступна в каналах",
+        "general_exception_message": "Вылезла ошибка",
+        "days": "дней",
+        "hours": "часов",
+        "minutes": "минут",
+        "seconds": "секунд",
+        "settings_warns_header": "Предупреждения",
+        "settings_restrict_cmds_usage_header": "Как юзать огранич. команды?",
+        "settings_restrict_cmds_usage_hint": "Обратите внимание, что для использования fban и funban необходимо установить ID фед-чата.",
+        "settings_admin_cmds_usage_header": "Как юзать админ команды?",
+        "info_popup_title": "Подсказка",
+        "alert_close_button_text": "Закрыть",
+        "disable_autoupdate_label": "Откл. автообновление",
+    }
+    uk = {
+        "min_restriction_time_info": "Мін. час обмеження - 35с (інакше — безстроково)",
+        "max_restriction_time_info": "Макс. час обмеження - 365д (інакше — безстроково)",
+        "user_has_not_been_specified": "Користувач не вказаний (ID, @username або відповідь)",
+        "user_was_not_found": "Користувач не знайден",
+        "tried_to_restrict_myself": "Така собі спроба харакірі, братанчік",
+        "tried_to_restrict_admins": "Неможливо обмежити адмінів!",
+        "restriction_message": "{user} був {action}.",
+        "restriction_time_addition": "на {time}.",
+        "restriction_date_addition": "до {time}.",
+        "restriction_reason_addition": "Причина: {reason}.",
+        "ban": "забанений",
+        "fban": "забанений у федерації",
+        "funban": "розбанений у федерації",
+        "kick": "виключений",
+        "mute": "заглушений",
+        "unmute": "розглушений",
+        "unban": "розбанений",
+        "unset_fed_chat": "ID фед-чату не вказаний! Укажіть його в налаштуваннях плагіну!",
+        "incorrect_fed_chat": "Некоректний ID фед-чату!",
+        "fed_chat_was_not_found": "Фед-чат не знайдено!",
+        "cannot_send_msgs_in_fed_chat": "Не можу надсилати повідомлення у фед-чат!",
+        "slowmode_value_warn": "Слоумод можна вказати лише з часом із налаштувань групи",
+        "slowmode_disabled": "Слоумод вимкнено.",
+        "slowmode_has_been_set": "Повільний режим встановлено на {time}.",
+        "cannot_promote_myself": "Не можна видати адміна самому собі!",
+        "successful_demote": "Користувача успішно знято з адміна!",
+        "cannot_demote_myself": "Не можна зняти адміна з самого себе!",
+        "max_warns_count_hint": "(досягнуто макс. кількість попереджень)",
+        "warn_message": "{user} отримав попередження ({warns_count}).",
+        "no_warns_to_unwarn": "Немає попереджень для зняття!",
+        "unwarn_message": "З {user} знято попередження ({warns_count}).",
+        "user_warns": "Видано попередження для {user} ({warns_count}):\n",
+        "warn_info": (
+            "\n"
+            "Попередження {index}/{max_count}:\n"
+            "  Дата: `{date}`\n"
+            "  Причина: `{reason}`"
+            "\n"
+        ),
+        "admins_cannot_be_warned": "Адмінам не можна видавати попередження!",
+        "cannot_warn_myself": "Не можна видавати собі попередження!",
+        "cannot_execute_without_zwylib": "Неможливо виконати команду без ZwyLib!",
+        "zwylib_was_not_found": "Не знайдено обов’язковий плагін ZwyLib!",
+        "settings_usage": "Використання",
+        "settings_commands": "Команди",
+        "settings_actions": "Дії",
+        "action": "дія",
+        "user_inline_arg": "ID | юзерка | відповідь",
+        "time_inline_arg": "час",
+        "reason_inline_arg": "причина",
+        "required_arg": "обов’язково",
+        "optional_arg": "необов’язково",
+        "settings_examples": "Приклади",
+        "settings_reply": "(відповідь)",
+        "settings_other_header": "Інше",
+        "settings_fed_chat_id_label": "ID фед-чату",
+        "settings_command_prefix_label": "Префікс команд",
+        "settings_max_warns_until_punish_label": "Кількість до покарання",
+        "settings_warns_punish_action_label": "Покарання після досяг. ліміту",
+        "settings_punish_duration_label": "Тривалість покарання",
+        "settings_punish_duration_hint": "час по типу 1w2d",
+        "settings_time_formatting_header": "Формат часу",
+        "settings_date_instead_of_time_label": "Дата замість кількості часу",
+        "settings_date_instead_of_time_hint": "дд/мм/РРРР ГГ:ХХ замість N днів",
+        "settings_swap_day_and_month_label": "Поміняти день і місяць",
+        "settings_swap_day_and_month_hint": "мм/дд/РРРР замість дд/мм/РРРР",
+        "settings_add_seconds_to_date_label": "Додати секунди до дати",
+        "settings_add_seconds_to_date_hint": "ГГ:ХХ:СС замість ГГ:ХХ",
+        "settings_dev_header": "Розробничиське",
+        "settings_debug_mode_label": "Дебаг-режим",
+        "settings_debug_mode_hint": "Логує налагоджувальну інформацію",
+        "settings_disable_autoupdate_hint": "Щоб відбувся відкат до стабільної версії під час дебагу",
+        "settings_generation_error": "Сталася помилка в",
+        "have_no_permissions": "Немає прав на обмеження користувачів!",
+        "cannot_use_command_in_dialogs": "Неможливо використати команду в діалогах!",
+        "cannot_use_command_in_channels": "Неможливо використати команду в каналах!",
+        "general_exception_message": "Сталася помилка",
+        "days": "днів",
+        "hours": "годин",
+        "minutes": "хвилин",
+        "seconds": "секунд",
+        "settings_warns_header": "Попередження",
+        "settings_restrict_cmds_usage_header": "Як викор. обмежувальні команди?",
+        "settings_restrict_cmds_usage_hint": "Зверніть увагу, що для використання fban і funban необхідно встановити ID фед-чату.",
+        "settings_admin_cmds_usage_header": "Як викор. адмін команди?",
+        "info_popup_title": "Підказка",
+        "alert_close_button_text": "Закрити",
+        "disable_autoupdate_label": "Вимк. автообновлення",
+    }
+    en = default
+
+
+class InfoAlertPopup:
+    def __init__(self, title: str, text: str):
+        self.text = text
+        self.title = title
+        self._alert_builder_instance: Optional[AlertDialogBuilder] = None
+
+    def show_alert(self):
+        last_fragment = get_last_fragment()
+        if not last_fragment or not last_fragment.getParentActivity():
+            log("Could not get context to show info alert")
+            return
+
+        if (
+                self._alert_builder_instance
+                and self._alert_builder_instance.get_dialog()
+                and self._alert_builder_instance.get_dialog().isShowing()
+        ):
+            log("Info alert is already showing")
+            return
+
+        log("Creating info alert...")
+        context = last_fragment.getParentActivity()
+        self._alert_builder_instance = AlertDialogBuilder(context, AlertDialogBuilder.ALERT_TYPE_MESSAGE)
+        self._alert_builder_instance.set_title(self.title)
+        self._alert_builder_instance.set_message(self.text)
+        self._alert_builder_instance.create()
+        self._alert_builder_instance.set_cancelable(True)
+        self._alert_builder_instance.set_canceled_on_touch_outside(True)
+        self._alert_builder_instance.set_positive_button(localise("alert_close_button_text"))
+
+        self._alert_builder_instance.show()
+        log("Info alert shown")
+
+    def dismiss_dialog(self):
+        if (
+                self._alert_builder_instance
+                and self._alert_builder_instance.get_dialog()
+                and self._alert_builder_instance.get_dialog().isShowing()
+        ):
+            self._alert_builder_instance.dismiss()
+            self._alert_builder_instance = None
+            log("Info alert dismissed")
+
+
+def localise(key: str) -> str:
+    locale_dict = getattr(Locales, locale, Locales.default)
+    return locale_dict.get(key, key)
+
+
+def is_warn_command_available(user, chat_id: int) -> bool:
+    if UserUtils.is_admin(chat_id, user.id):
+        log("Failed to execute command (parsed user is admin)")
+        show_error_bulletin(localise("admins_cannot_be_warned"))
+        return False
+
+    if user.id == get_user_config().clientUserId:
+        log("Failed to execute command (parsed user is me)")
+        show_error_bulletin(localise("cannot_warn_myself"))
+        return False
+
+    if not is_zwylib_present():
+        log("Failed to execute command (Zwylib is missing)")
+        show_error_bulletin(localise("cannot_execute_without_zwylib"))
+        return False
+    return True
+
+
+def get_chat(chat_id: Union[int, TLRPC.Chat]) -> Optional[TLRPC.Chat]:
+    return get_messages_controller().getChat(chat_id) if isinstance(chat_id, int) else chat_id
+
+
+def normalize_chat_id(chat_id: Union[str, int]) -> Optional[int]:
+    _chat_id = str(chat_id)
+    if not _chat_id.lstrip("-").isdigit():
+        return None
+    return int(_chat_id[4:] if _chat_id.startswith("-100") else _chat_id)
+
+
+def send_unban_request(chat_id: int, user_id: int, delay: int = 0):
+    messages_controller = get_messages_controller()
+
+    def process(response, error):
+        def run_on_ui():
+            chat = updates.chats[0]
+            messages_controller.loadFullChat(chat.id, 0, True)
+
+        if response is not None:
+            updates = cast(TLRPC.Updates, response)
+            messages_controller.processUpdates(updates, False)
+
+            if updates.chats:
+                run_on_ui_thread(run_on_ui)
+        elif error is not None:
+            log("send_unban_request error:")
+            log(error)
+
+    request = TLRPC.TL_channels_editBanned()
+    request.participant = messages_controller.getInputPeer(user_id)
+    request.channel = messages_controller.getInputChannel(chat_id)
+    request.banned_rights = TLRPC.TL_chatBannedRights()
+
+    run_on_queue(lambda: send_request(request, process), delay=delay)
+
+
+def send_change_slowmode_request(seconds: int, chat_id: int):
+    def process(response, error):
+        if response is not None:
+            updates = cast(TLRPC.Updates, response)
+            get_messages_controller().processUpdates(updates, False)
+        elif error is not None:
+            if error.text == "CHAT_NOT_MODIFIED":
+                return
+
+            log("Request error:")
+            log(error)
+
+    request = TLRPC.TL_channels_toggleSlowMode()
+    request.channel = get_messages_controller().getInputChannel(chat_id)
+    request.seconds = seconds
+    run_on_ui_thread(lambda: send_request(request, process))
+
+
+def delete_message(messages: List[int], chat_id: int, topic_id: int):
+    log("Sending delete messages request with messages ids: " + ", ".join([str(i) for i in messages]))
+
+    msgs = ArrayList()
+    for i in messages:
+        msgs.add(jint(i))
+
+    get_messages_controller().deleteMessages(msgs, None, None, chat_id, topic_id, True, 0)
+
+
+def log(obj: str):
+    if debug_mode:
+        _log(f"{__name__}: " + str(obj))
+
+
+def show_error_bulletin(message: str):
+    BulletinHelper.show_error(f"{__name__}: " + message)
+
+
+def show_success_bulletin(message: str):
+    BulletinHelper.show_success(f"{__name__}: " + message)
+
+
+def show_info_bulletin(message: str):
+    BulletinHelper.show_info(f"{__name__}: " + message)
+
+
+def get_all_punish_actions() -> List[str]:
+    return [cmd.value for cmd in RestrictCommands.Commands]
+
+
+def import_zwylib(show_import_error_bulletin = True):
+    global zwylib
+
+    try:
+        import zwylib
+    except ImportError:
+        if show_import_error_bulletin:
+            show_error_bulletin(localise("zwylib_was_not_found"))
+
+
+def is_zwylib_present() -> bool:
+    return zwylib is not None
+
+
+def switch_debug_mode(new_value: bool):
+    global debug_mode
+    debug_mode = new_value
+
+
+def switch_autoupdater(new_value: bool):
+    if new_value:
+        zwylib.add_autoupdater_task(__id__, AUTOUPDATE_CHANNEL_ID, AUTOUPDATE_CHANNEL_USERNAME, AUTOUPDATE_MESSAGE_ID)
+    else:
+        zwylib.remove_autoupdater_task(__id__)
+
+
+AUTOUPDATE_CHANNEL_ID = 2521243181
+AUTOUPDATE_CHANNEL_USERNAME = "zwyPlugins"
+AUTOUPDATE_MESSAGE_ID = 32
+
+DEFAULT_PREFIX = "."
+DEFAULT_FED_CHAT = ""
+DEFAULT_DATE_INSTEAD_OF_TIME = False
+DEFAULT_SWAP_DAY_AND_MONTH = False
+DEFAULT_ADD_SECONDS_TO_DATE = False
+DEFAULT_DEBUG_MODE = False
+DEFAULT_DISABLE_AUTOUPDATER = False
+DEFAULT_MAX_WARNS_UNTIL_PUNISH = "3"
+DEFAULT_MAX_WARNS_PUNISH = RestrictCommands.Commands.MUTE.to_str()
+DEFAULT_PUNISH_DURATION = "1mo"
+
+locale = Locale.getDefault().getLanguage()
+prefix = str(DEFAULT_PREFIX)
+debug_mode = bool(DEFAULT_DEBUG_MODE)
+zwylib: Any = None
+warns_cache: Any = None
+setting_getter: Optional[Callable] = None
+command_controllers = (RestrictCommands, AdminCommands)
+
+
+class ZwyModTools(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.info_alert_popup: Optional[InfoAlertPopup] = None
+
+    def on_plugin_load(self):
+        global setting_getter, debug_mode, warns_cache
+        self.add_on_send_message_hook()
+
+        setting_getter = self.get_setting
+        debug_mode = self.get_setting("debug_mode", DEFAULT_DEBUG_MODE)
+
+        import_zwylib()
+        if is_zwylib_present():
+            zwylib.add_autoupdater_task(__id__, AUTOUPDATE_CHANNEL_ID, AUTOUPDATE_CHANNEL_USERNAME, AUTOUPDATE_MESSAGE_ID)
+            warns_cache = zwylib.JsonCacheFile("admintools__warns_db", {})
+
+        log("Loaded")
+
+    def on_plugin_unload(self):
+        if is_zwylib_present():
+            zwylib.remove_autoupdater_task(__id__)
+
+        if self.info_alert_popup:
+            run_on_ui_thread(lambda: self.info_alert_popup.dismiss_dialog())
+
+        log("Unloaded")
+
+    def create_settings(self):
+        global prefix, debug_mode
+        CommandUtils.refresh_prefix()
+
+        l = localise
+        p = prefix
+
+        def update_prefix(new_value: str = None):
+            if not new_value:
+                return
+
+            global prefix
+            prefix = new_value
+
+        try:
+            date_instead_of_time = self.get_setting("date_instead_of_time", DEFAULT_DATE_INSTEAD_OF_TIME)
+            debug_mode = self.get_setting("debug_mode", DEFAULT_DATE_INSTEAD_OF_TIME)
+            restrict_cmds_usage_text = "\n".join((
+                f"< > - {l('required_arg')}, [ ] - {l('optional_arg')}",
+                "",
+                f"{l('settings_actions')}:",
+                "  " + " ".join(get_all_punish_actions()),
+                "",
+                f"{l('settings_usage')}:",
+                f"  {p}[s][d]{l('action')} <{l('user_inline_arg')}> [{l('time_inline_arg')}] [{l('reason_inline_arg')}]",
+                "",
+                f"{l('settings_examples')}:",
+                f"  {p}mute @zwylair 1mo bwaaa",
+                f"  {p}dban 880708503 ad",
+                f"  {l('settings_reply')} {p}sdkick",
+                "",
+                "",
+                l("settings_restrict_cmds_usage_hint"),
+            ))
+            admin_cmds_usage_text = "\n".join((
+                f"< > - {l('required_arg')}, [ ] - {l('optional_arg')}",
+                "",
+                f"{l('settings_commands')}:",
+                f"  {p}slowmode <{l('time_inline_arg')}>",
+                f"  {p}promote <{l('user_inline_arg')}>",
+                f"  {p}demote <{l('user_inline_arg')}>",
+                f"  {p}warn <{l('user_inline_arg')}> [{l('reason_inline_arg')}]",
+                f"  {p}unwarn <{l('user_inline_arg')}>",
+                f"  {p}warns <{l('user_inline_arg')}>",
+                "",
+                f"{l('settings_examples')}:",
+                f"  {p}demote @zwylair unluck bro",
+                f"  {p}slowmode 15m",
+            ))
+
+            return [
+                Header(text=l("settings_usage")),
+                Text(
+                    text=l("settings_restrict_cmds_usage_header"),
+                    icon="msg_info",
+                    on_click=lambda view: self.handle_show_info_alert_click(
+                        view,
+                        l("info_popup_title"),
+                        restrict_cmds_usage_text
+                    )
+                ),
+                Text(
+                    text=l("settings_admin_cmds_usage_header"),
+                    icon="msg_info",
+                    on_click=lambda view: self.handle_show_info_alert_click(
+                        view,
+                        l("info_popup_title"),
+                        admin_cmds_usage_text
+                    )
+                ),
+                Header(text=l("settings_other_header")),
+                Input(
+                    key="fed_chat_id",
+                    text=l("settings_fed_chat_id_label"),
+                    default=DEFAULT_FED_CHAT,
+                    icon="msg_discuss",
+                ),
+                Input(
+                    key="prefix",
+                    text=l("settings_command_prefix_label"),
+                    default=DEFAULT_PREFIX,
+                    icon="msg_limit_stories",
+                    on_change=update_prefix,
+                ),
+                Header(text=l("settings_warns_header")),
+                Input(
+                    key="max_warns_until_punish",
+                    text=l("settings_max_warns_until_punish_label"),
+                    default=DEFAULT_MAX_WARNS_UNTIL_PUNISH,
+                    icon="msg_stories_timer",
+                ),
+                Input(
+                    key="warns_punish_action",
+                    text=l("settings_warns_punish_action_label"),
+                    subtext="/".join(get_all_punish_actions()),
+                    default=DEFAULT_MAX_WARNS_PUNISH,
+                    icon="msg_admins",
+                ),
+                Input(
+                    key="warns_punish_duration",
+                    text=l("settings_punish_duration_label"),
+                    subtext=l("settings_punish_duration_hint"),
+                    default=DEFAULT_PUNISH_DURATION,
+                    icon="msg_mute_1h",
+                ),
+                Divider(),
+                Header(text=l("settings_time_formatting_header")),
+                Switch(
+                    key="date_instead_of_time",
+                    text=l("settings_date_instead_of_time_label"),
+                    subtext=l("settings_date_instead_of_time_hint"),
+                    default=DEFAULT_DATE_INSTEAD_OF_TIME,
+                    icon="msg_replace",
+                ),
+                Switch(
+                    key="swap_day_and_month",
+                    text=l("settings_swap_day_and_month_label"),
+                    subtext=l("settings_swap_day_and_month_hint"),
+                    default=DEFAULT_SWAP_DAY_AND_MONTH,
+                    icon="msg_switch",
+                ) if date_instead_of_time else None,
+                Switch(
+                    key="add_seconds_to_date",
+                    text=l("settings_add_seconds_to_date_label"),
+                    subtext=l("settings_add_seconds_to_date_hint"),
+                    default=DEFAULT_ADD_SECONDS_TO_DATE,
+                    icon="msg_stories_archive",
+                ) if date_instead_of_time else None,
+                Header(text=l("settings_dev_header")),
+                Switch(
+                    key="debug_mode",
+                    text=l("settings_debug_mode_label"),
+                    subtext=l("settings_debug_mode_hint"),
+                    default=DEFAULT_DEBUG_MODE,
+                    icon="msg_log",
+                    on_change=switch_debug_mode,
+                ),
+                Switch(
+                    key="disable_autoupdate",
+                    text=l("disable_autoupdate_label"),
+                    subtext=l("settings_disable_autoupdate_hint"),
+                    default=DEFAULT_DISABLE_AUTOUPDATER,
+                    icon="msg_download",
+                    on_change=switch_autoupdater,
+                ) if debug_mode else None,
+            ]
+        except Exception:
+            text = (
+                f"{l('settings_generation_error')} {self.__class__.__name__}.create_settings():\n"
+                f"{traceback.format_exc().rstrip()}"
+            )
+            log(text)
+            return [Divider(text=text)]
+
+    def on_send_message_hook(self, account, params):
+        CommandUtils.refresh_prefix()
+
+        if not hasattr(params, "message") or not isinstance(params.message, str):
+            return HookResult()
+
+        try:
+            message_text = params.message
+            message_parts = message_text.split(" ")
+            raw_command = message_parts[0]
+            hook_result = HookResult(strategy=HookStrategy.CANCEL)
+            chat = get_chat(-params.peer)
+
+            if not message_text.startswith(prefix):
+                return HookResult()
+
+            if message_text.startswith(prefix * 2):
+                params.message = params.message[len(prefix):]
+                return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+            log(f"Trying to parse {raw_command} command")
+            for command_controller in command_controllers:
+                log(f"Parsing with: {command_controller.__name__}...")
+
+                try:
+                    action = command_controller.parse_command(message_parts)
+                except ValueError:
+                    continue
+                else:
+                    if action is not None:
+                        log(f"Command {action.to_str()} was handled")
+                        break
+            else:
+                log(f"Command {raw_command} was not parsed by anyone. Skipping")
+                return HookResult()
+
+            if ChatObject.isChannelAndNotMegaGroup(chat):
+                log(f"Tried using command {action.to_str()} in channels. Nah bruh, u cant")
+                show_error_bulletin(localise("cannot_use_command_in_channels"))
+                return hook_result
+
+            if chat is None:
+                log(f"Tried using command {action.to_str()} in dialog (???)")
+                show_error_bulletin(localise("cannot_use_command_in_dialogs"))
+                return hook_result
+
+            if not UserUtils.has_admin_permissions(chat):
+                log(f"Tried using command {action.to_str()} on admin")
+                show_error_bulletin(localise("have_no_permissions"))
+                return hook_result
+
+            log(f"Executing {action.to_str()} command")
+            hook_result = command_controller.execute_command(params, action, message_parts)
+            return hook_result
+        except Exception:
+            message = (
+                f"{localise('general_exception_message')}:\n"
+                "```\n"
+                f"{traceback.format_exc().rstrip()}\n"
+                "```"
+            )
+            message = parse_markdown(message)
+
+            params.message = message.text
+            for i in message.entities:
+                params.entities.add(i.to_tlrpc_object())
+
+            return HookResult(strategy=HookStrategy.MODIFY_FINAL, params=params)
+
+    def handle_show_info_alert_click(self, view, title: str, text: str):
+        self.info_alert_popup = InfoAlertPopup(title, text)
+        self.info_alert_popup.show_alert()

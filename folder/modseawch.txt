@@ -1,0 +1,100 @@
+import requests
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.settings import Header, Divider
+from java.util import Locale
+from html import escape
+
+__id__ = "modrinth_search_001"
+__name__ = "Modrinth Search"
+__version__ = "1.0.0"
+__author__ = "@shrdevv"
+__description__ = "Поиск модов, текстур, плагинов, датапаков и шейдеров на modrinth.com: .srcmod, .srctp, .srcplug, .srcdata, .srcshd"
+__min_version__ = "11.12.0"
+__icon__ = "plugin232/11"
+
+MODRINTH_API_URL = "https://api.modrinth.com/v2/search"
+
+COMMANDS = {
+    ".srcmod": "mod",
+    ".srctp": "resourcepack",
+    ".srcplug": "plugin",
+    ".srcdata": "datapack",
+    ".srcshd": "shader"
+}
+
+class Locales:
+    ru = {
+        "USAGE": "Пример: .srcmod sodium",
+        "NOT_FOUND": "Ничего не найдено :(",
+        "ERROR": "Ошибка при поиске: ",
+        "SETTINGS_TITLE": "Настройки Modrinth Search",
+        "USAGE_ALL": ".srcmod/.srctp/.srcplug/.srcdata/.srcshd [запрос]"
+    }
+    en = {
+        "USAGE": "Usage: .srcmod sodium",
+        "NOT_FOUND": "Nothing found :(",
+        "ERROR": "Search error: ",
+        "SETTINGS_TITLE": "Modrinth Search Settings",
+        "USAGE_ALL": ".srcmod/.srctp/.srcplug/.srcdata/.srcshd [query]"
+    }
+    default = en
+
+def get_locale():
+    lang = Locale.getDefault().getLanguage()
+    return getattr(Locales, lang, Locales.default)
+
+class ModrinthSearchPlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+
+    def create_settings(self):
+        loc = get_locale()
+        return [
+            Header(loc["SETTINGS_TITLE"]),
+            Divider(text=loc["USAGE_ALL"])
+        ]
+
+    def on_send_message_hook(self, account, params):
+        if not hasattr(params, "message") or not isinstance(params.message, str):
+            return HookResult()
+        msg = params.message.strip()
+        loc = get_locale()
+        for cmd, ptype in COMMANDS.items():
+            if msg.startswith(cmd):
+                query = msg[len(cmd):].strip()
+                if not query:
+                    params.message = loc["USAGE"]
+                    return HookResult(strategy=HookStrategy.MODIFY, params=params)
+                result = self.search_modrinth(query, ptype)
+                params.message = result
+                return HookResult(strategy=HookStrategy.MODIFY, params=params)
+        return HookResult()
+
+    def search_modrinth(self, query, project_type):
+        loc = get_locale()
+        headers = {"User-Agent": "modrinthSearchPlugin/1.0.0 (@shrdevv)"}
+        facets = f'[["project_type:{project_type}"]]'
+        params = {
+            "query": query,
+            "facets": facets,
+            "limit": 1
+        }
+        try:
+            r = requests.get(MODRINTH_API_URL, params=params, headers=headers, timeout=10)
+            if r.status_code == 200 and r.json().get("hits"):
+                hit = r.json()["hits"][0]
+                name = hit.get("title", "")
+                author = hit.get("author", "")
+                downloads = hit.get("downloads", 0)
+                desc = hit.get("description", "")
+                url = f'https://modrinth.com/{project_type}/{hit.get("slug", "")}'
+                result = (
+                    f"[{name}] by {author}\n"
+                    f"Download: {downloads}\n"
+                    f"Description: {desc}\n\n"
+                    f"{url}"
+                )
+                return result
+            return loc["NOT_FOUND"]
+        except Exception as e:
+            return loc["ERROR"] + str(e) 

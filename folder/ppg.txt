@@ -1,0 +1,1884 @@
+# -*- coding: utf-8 -*-
+# Написан @lisurgut x twplu.t.me
+# Написан @lisurgut & twplu.t.me
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+__id__ = "ppg"
+# Написан @lisurgut & twplu.t.me
+__name__ = "Palette Generator"
+# Написан @lisurgut & twplu.t.me
+__author__ = "@lisurgut & twplu.t.me"
+# Написан @lisurgut & twplu.t.me
+__version__ = "v5.000"
+# Написан @lisurgut & twplu.t.me
+__description__ = """Генерирует цветовые палитры по текстовому запросу с помощью AI или берет из изображения."""
+# Написан @lisurgut & twplu.t.me
+__min_version__ = "11.12.0"
+# Написан @lisurgut & twplu.t.me
+__icon__ = "HDkolobok/14"
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+import requests
+# Написан @lisurgut & twplu.t.me
+import threading
+# Написан @lisurgut & twplu.t.me
+import re
+# Написан @lisurgut & twplu.t.me
+import os
+# Написан @lisurgut & twplu.t.me
+import uuid
+# Написан @lisurgut & twplu.t.me
+import time
+# Написан @lisurgut & twplu.t.me
+import math
+# Написан @lisurgut & twplu.t.me
+import traceback
+# Написан @lisurgut & twplu.t.me
+import colorsys
+# Написан @lisurgut & twplu.t.me
+from typing import Any, Optional
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+try:
+# Написан @lisurgut & twplu.t.me
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageOps
+# Написан @lisurgut & twplu.t.me
+except ImportError:
+# Написан @lisurgut & twplu.t.me
+    raise ImportError("Для работы этого плагина необходима библиотека Pillow (PIL).")
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+from base_plugin import BasePlugin, HookResult, HookStrategy, MenuItemData, MenuItemType
+# Написан @lisurgut & twplu.t.me
+from client_utils import send_message, get_send_messages_helper, get_last_fragment
+# Написан @lisurgut & twplu.t.me
+from android_utils import run_on_ui_thread, log
+# Написан @lisurgut & twplu.t.me
+from ui.bulletin import BulletinHelper
+# Написан @lisurgut & twplu.t.me
+from ui.settings import Header, Input, Selector, Switch, Divider, Text
+# Написан @lisurgut & twplu.t.me
+from markdown_utils import parse_markdown
+# Написан @lisurgut & twplu.t.me
+from java.io import File
+# Написан @lisurgut & twplu.t.me
+from java.util import Locale
+# Написан @lisurgut & twplu.t.me
+from org.telegram.messenger import ApplicationLoader, MessageObject, FileLoader, UserConfig, ImageLocation, SendMessagesHelper, R, AndroidUtilities
+# Написан @lisurgut & twplu.t.me
+from org.telegram.tgnet import TLRPC
+# Написан @lisurgut & twplu.t.me
+from com.exteragram.messenger.plugins import PluginsController
+# Написан @lisurgut & twplu.t.me
+from com.exteragram.messenger.plugins.ui import PluginSettingsActivity
+# Написан @lisurgut & twplu.t.me
+from org.telegram.ui.ActionBar import Theme
+# Написан @lisurgut & twplu.t.me
+from android.widget import LinearLayout, TextView
+# Написан @lisurgut & twplu.t.me
+from ui.alert import AlertDialogBuilder
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+API_URL = "https://text.pollinations.ai/openai/v1/chat/completions"
+# Написан @lisurgut & twplu.t.me
+TEMP_DIR_NAME = "ai_color_palettes"
+# Написан @lisurgut & twplu.t.me
+FONT_URL = "https://github.com/Igroshka/-/raw/refs/heads/main/font/couriercyrps.ttf"
+# Написан @lisurgut & twplu.t.me
+FONT_NAME = "CourierNew.ttf"
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+AI_MODELS_API = [
+# Написан @lisurgut & twplu.t.me
+    "gpt-4.1-nano", "openai", "phi", "deepseek-v3", "grok-3-mini", "llamascout", "qwen-coder", "openai-reasoning", "gemma-2", "codegemma", "mixtral-large", "wizard-lm"
+# Написан @lisurgut & twplu.t.me
+]
+# Написан @lisurgut & twplu.t.me
+AI_MODELS_DISPLAY = [
+# Написан @lisurgut & twplu.t.me
+    "GPT-4.1 Nano", "GPT-4o Mini", "Phi-4 Mini", "DeepSeek V3", "Grok-3 Mini", "Llama 4", "Qwen 2.5", "O3 (Reasoning)", "Gemma 2", "CodeGemma", "Mixtral Large", "WizardLM 2"
+# Написан @lisurgut & twplu.t.me
+]
+# Написан @lisurgut & twplu.t.me
+COLOR_FORMATS_DISPLAY_PB = [
+# Написан @lisurgut & twplu.t.me
+    "HEX (#RRGGBB)", "RGB (r,g,b)", "HSL (h,s,l)", "HSV (h,s,v)", "CMYK (c,m,y,k)", "CSS (rgb(r,g,b))"
+# Написан @lisurgut & twplu.t.me
+]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+class LocalizationManager:
+# Написан @lisurgut & twplu.t.me
+    strings = {
+# Написан @lisurgut & twplu.t.me
+        "ru": {
+# Написан @lisurgut & twplu.t.me
+            "SETTINGS_HEADER": "Настройки генератора палитр",
+# Написан @lisurgut & twplu.t.me
+            "ENABLE_PLUGIN": "Включить плагин",
+# Написан @lisurgut & twplu.t.me
+            "SHOW_SETTINGS_IN_MENU": "Кнопка настроек в меню чата",
+# Написан @lisurgut & twplu.t.me
+            "AI_HEADER": "Генерация по тексту (AI)",
+# Написан @lisurgut & twplu.t.me
+            "CMD_PREFIX": "Команда для генерации по тексту",
+# Написан @lisurgut & twplu.t.me
+            "TITLE_TEMPLATE": "Шаблон заголовка",
+# Написан @lisurgut & twplu.t.me
+            "TITLE_TEMPLATE_SUB": "Используйте {prompt} для запроса.",
+# Написан @lisurgut & twplu.t.me
+            "AI_MODEL": "Модель нейросети",
+# Написан @lisurgut & twplu.t.me
+            "COLOR_COUNT": "Количество цветов в палитре (AI)",
+# Написан @lisurgut & twplu.t.me
+            "IMAGE_HEADER": "Генерация из фото",
+# Написан @lisurgut & twplu.t.me
+            "CMD_FROM_IMAGE": "Команда для генерации из фото",
+# Написан @lisurgut & twplu.t.me
+            "TITLE_FROM_IMAGE_TEMPLATE": "Шаблон заголовка (из фото)",
+# Написан @lisurgut & twplu.t.me
+            "EXTRACT_COLOR_COUNT": "Количество цветов для извлечения",
+# Написан @lisurgut & twplu.t.me
+            "QUANTIZE_METHOD": "Метод извлечения цветов",
+# Написан @lisurgut & twplu.t.me
+            "QUANTIZE_ITEMS": ["Макс. покрытие", "Срез по медиане", "Быстрое дерево (рекомендуется)"],
+# Написан @lisurgut & twplu.t.me
+            "COLOR_SORT": "Сортировка цветов из фото",
+# Написан @lisurgut & twplu.t.me
+            "COLOR_SORT_ITEMS": ["Нет", "По оттенку", "По яркости", "По насыщенности"],
+# Написан @lisurgut & twplu.t.me
+            "BLUR_RADIUS": "Радиус размытия фона",
+# Написан @lisurgut & twplu.t.me
+            "BG_DARKNESS": "Затемнение фона (в %)",
+# Написан @lisurgut & twplu.t.me
+            "IMAGE_STYLE_HEADER": "Настройки вида изображения",
+# Написан @lisurgut & twplu.t.me
+            "PALETTE_LAYOUT": "Расположение палитры",
+# Написан @lisurgut & twplu.t.me
+            "LAYOUT_ITEMS": ["Сетка", "Горизонтально", "Вертикально"],
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_SHAPE": "Форма плашек с цветом",
+# Написан @lisurgut & twplu.t.me
+            "SHAPE_ITEMS": ["Закругленный квадрат", "Квадрат", "Круг"],
+# Написан @lisurgut & twplu.t.me
+            "SQUARE_SIZE": "Размер плашки (px)",
+# Написан @lisurgut & twplu.t.me
+            "PADDING": "Отступ между плашками (px)",
+# Написан @lisurgut & twplu.t.me
+            "OUTER_PADDING": "Внешний отступ от края (px)",
+# Написан @lisurgut & twplu.t.me
+            "SOLID_BG_COLOR": "Цвет фона (для AI, HEX)",
+# Написан @lisurgut & twplu.t.me
+            "SOLID_BG_COLOR_SUB": "Напр. #121212. Оставьте пустым для черного.",
+# Написан @lisurgut & twplu.t.me
+            "BORDER_ENABLE": "Включить обводку плашек",
+# Написан @lisurgut & twplu.t.me
+            "BORDER_WIDTH": "Толщина обводки (px)",
+# Написан @lisurgut & twplu.t.me
+            "BORDER_COLOR": "Цвет обводки (HEX)",
+# Написан @lisurgut & twplu.t.me
+            "CODES_ON_IMAGE": "Показывать коды на изображении",
+# Написан @lisurgut & twplu.t.me
+            "FONT_SIZE": "Размер шрифта на изображении",
+# Написан @lisurgut & twplu.t.me
+            "FONT_COLOR": "Цвет шрифта на изображении (HEX)",
+# Написан @lisurgut & twplu.t.me
+            "IMAGE_FORMAT": "Формат итогового изображения",
+# Написан @lisurgut & twplu.t.me
+            "FORMAT_ITEMS": ["PNG (качество)", "JPG (сжатие)"],
+# Написан @lisurgut & twplu.t.me
+            "SENDING_HEADER": "Настройки отправки сообщения",
+# Написан @lisurgut & twplu.t.me
+            "CAPTION_HEADER": "Настройки подписи",
+# Написан @lisurgut & twplu.t.me
+            "SEND_MODE": "Режим отправки",
+# Написан @lisurgut & twplu.t.me
+            "SEND_MODE_ITEMS": ["Фото + Текст", "Фото с подписью", "Файл + Текст"],
+# Написан @lisurgut & twplu.t.me
+            "CODE_FORMAT": "Формат кодов цветов в тексте",
+# Написан @lisurgut & twplu.t.me
+            "CODE_SEPARATOR": "Разделитель кодов",
+# Написан @lisurgut & twplu.t.me
+            "SEPARATOR_ITEMS": ["Новая строка", "Запятая и пробел", "Тире", "Вертикальная черта", "Точка-маркер", "Двойной перенос", "Пробел"],
+# Написан @lisurgut & twplu.t.me
+            "CODE_LINE_TEMPLATE": "Шаблон строки с кодом",
+# Написан @lisurgut & twplu.t.me
+            "CODE_LINE_TEMPLATE_SUB": "Используйте {code} и {name}.",
+# Написан @lisurgut & twplu.t.me
+            "FOOTER_TEXT": "Дополнительный текст в конце",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_GRID_ENABLE": "Авто-сетка",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_GRID_ENABLE_SUB": "Автоматически подбирает размер плашек под разрешение.",
+# Написан @lisurgut & twplu.t.me
+            "TARGET_RESOLUTION": "Разрешение изображения",
+# Написан @lisurgut & twplu.t.me
+            "TARGET_RESOLUTION_SUB": "Формат: ШиринаxВысота, напр. 1920x1080",
+# Написан @lisurgut & twplu.t.me
+            "AI_TEMPERATURE": "Температура AI (креативность)",
+# Написан @lisurgut & twplu.t.me
+            "AI_TEMPERATURE_SUB": "От 0.0 (точно) до 2.0 (очень креативно)",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_FONT_COLOR": "Авто-цвет шрифта на плашке",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_FONT_COLOR_SUB": "Автоматически выбирает черный/белый цвет.",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_SHADOW": "Тень у плашек",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_SHADOW_SUB": "Добавляет тень для объема.",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_RADIUS": "Радиус скругления (px)",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_RADIUS_SUB": "Для 'Закругленного квадрата'.",
+# Написан @lisurgut & twplu.t.me
+            "ADVANCED_HEADER": "Дополнительные настройки",
+# Написан @lisurgut & twplu.t.me
+            "SHOW_PROCESSING_TIME": "Показывать время генерации",
+# Написан @lisurgut & twplu.t.me
+            "SHOW_PROCESSING_TIME_SUB": "Добавляет время в конец сообщения.",
+# Написан @lisurgut & twplu.t.me
+            "ADD_COLOR_NAMES": "Добавлять названия цветов",
+# Написан @lisurgut & twplu.t.me
+            "ADD_COLOR_NAMES_SUB": "Делает запрос к TheColorAPI для каждого цвета.",
+# Написан @lisurgut & twplu.t.me
+            "SLOW_MODEL_WARNING": "Текущая модель отвечает медленно. Попробуйте выбрать другую.",
+# Написан @lisurgut & twplu.t.me
+            "CHANGE_MODEL_BUTTON": "Сменить модель",
+# Написан @lisurgut & twplu.t.me
+            "INTERNET_SHIT": "Интернет у тебя хуйня, брат",
+# Написан @lisurgut & twplu.t.me
+            "DETAILS_BUTTON": "Подробнее",
+# Написан @lisurgut & twplu.t.me
+            "INTERNET_HELP_TITLE": "Проблемы с интернетом?",
+# Написан @lisurgut & twplu.t.me
+            "INTERNET_HELP_MESSAGE": "Медленный интернет может быть вызван множеством причин. Вот несколько советов, которые могут помочь:\n\n1. Перезагрузите роутер и устройство.\n2. Попробуйте переключиться между Wi-Fi и мобильными данными.\n3. Проверьте, не используют ли другие приложения или устройства всю пропускную способность.\n4. Используйте VPN, если ваш провайдер ограничивает доступ к некоторым ресурсам.\n5. Свяжитесь с вашим интернет-провайдером для диагностики проблем на линии.",
+# Написан @lisurgut & twplu.t.me
+            "RECHECK_PING_BUTTON": "Перепроверить пинг"
+# Написан @lisurgut & twplu.t.me
+        },
+# Написан @lisurgut & twplu.t.me
+        "en": {
+# Написан @lisurgut & twplu.t.me
+            "SETTINGS_HEADER": "Palette Generator Settings",
+# Написан @lisurgut & twplu.t.me
+            "ENABLE_PLUGIN": "Enable Plugin",
+# Написан @lisurgut & twplu.t.me
+            "SHOW_SETTINGS_IN_MENU": "Settings button in chat menu",
+# Написан @lisurgut & twplu.t.me
+            "AI_HEADER": "Text Generation (AI)",
+# Написан @lisurgut & twplu.t.me
+            "CMD_PREFIX": "Command for text generation",
+# Написан @lisurgut & twplu.t.me
+            "TITLE_TEMPLATE": "Title template",
+# Написан @lisurgut & twplu.t.me
+            "TITLE_TEMPLATE_SUB": "Use {prompt} for the prompt.",
+# Написан @lisurgut & twplu.t.me
+            "AI_MODEL": "AI Model",
+# Написан @lisurgut & twplu.t.me
+            "COLOR_COUNT": "Number of colors in palette (AI)",
+# Написан @lisurgut & twplu.t.me
+            "IMAGE_HEADER": "Image Generation",
+# Написан @lisurgut & twplu.t.me
+            "CMD_FROM_IMAGE": "Command for image generation",
+# Написан @lisurgut & twplu.t.me
+            "TITLE_FROM_IMAGE_TEMPLATE": "Title template (from image)",
+# Написан @lisurgut & twplu.t.me
+            "EXTRACT_COLOR_COUNT": "Number of colors to extract",
+# Написан @lisurgut & twplu.t.me
+            "QUANTIZE_METHOD": "Color extraction method",
+# Написан @lisurgut & twplu.t.me
+            "QUANTIZE_ITEMS": ["Max Coverage", "Median Cut", "Fast Octree (recommended)"],
+# Написан @lisurgut & twplu.t.me
+            "COLOR_SORT": "Sort colors from photo",
+# Написан @lisurgut & twplu.t.me
+            "COLOR_SORT_ITEMS": ["None", "By Hue", "By Brightness", "By Saturation"],
+# Написан @lisurgut & twplu.t.me
+            "BLUR_RADIUS": "Background blur radius",
+# Написан @lisurgut & twplu.t.me
+            "BG_DARKNESS": "Background darkness (%)",
+# Написан @lisurgut & twplu.t.me
+            "IMAGE_STYLE_HEADER": "Image Style Settings",
+# Написан @lisurgut & twplu.t.me
+            "PALETTE_LAYOUT": "Palette Layout",
+# Написан @lisurgut & twplu.t.me
+            "LAYOUT_ITEMS": ["Grid", "Horizontal", "Vertical"],
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_SHAPE": "Color swatch shape",
+# Написан @lisurgut & twplu.t.me
+            "SHAPE_ITEMS": ["Rounded Square", "Square", "Circle"],
+# Написан @lisurgut & twplu.t.me
+            "SQUARE_SIZE": "Swatch size (px)",
+# Написан @lisurgut & twplu.t.me
+            "PADDING": "Padding between swatches (px)",
+# Написан @lisurgut & twplu.t.me
+            "OUTER_PADDING": "Outer padding (px)",
+# Написан @lisurgut & twplu.t.me
+            "SOLID_BG_COLOR": "Background color (for AI, HEX)",
+# Написан @lisurgut & twplu.t.me
+            "SOLID_BG_COLOR_SUB": "E.g. #121212. Leave empty for black.",
+# Написан @lisurgut & twplu.t.me
+            "BORDER_ENABLE": "Enable swatch border",
+# Написан @lisurgut & twplu.t.me
+            "BORDER_WIDTH": "Border width (px)",
+# Написан @lisurgut & twplu.t.me
+            "BORDER_COLOR": "Border color (HEX)",
+# Написан @lisurgut & twplu.t.me
+            "CODES_ON_IMAGE": "Show codes on image",
+# Написан @lisurgut & twplu.t.me
+            "FONT_SIZE": "Font size on image",
+# Написан @lisurgut & twplu.t.me
+            "FONT_COLOR": "Font color on image (HEX)",
+# Написан @lisurgut & twplu.t.me
+            "IMAGE_FORMAT": "Output image format",
+# Написан @lisurgut & twplu.t.me
+            "FORMAT_ITEMS": ["PNG (quality)", "JPG (compression)"],
+# Написан @lisurgut & twplu.t.me
+            "SENDING_HEADER": "Message Sending Settings",
+# Написан @lisurgut & twplu.t.me
+            "CAPTION_HEADER": "Caption Settings",
+# Написан @lisurgut & twplu.t.me
+            "SEND_MODE": "Sending mode",
+# Написан @lisurgut & twplu.t.me
+            "SEND_MODE_ITEMS": ["Photo + Text", "Photo with Caption", "File + Text"],
+# Написан @lisurgut & twplu.t.me
+            "CODE_FORMAT": "Color code format in text",
+# Написан @lisurgut & twplu.t.me
+            "CODE_SEPARATOR": "Code Separator",
+# Написан @lisurgut & twplu.t.me
+            "SEPARATOR_ITEMS": ["New Line", "Comma and Space", "Dash", "Pipe", "Bullet Point", "Double New Line", "Space"],
+# Написан @lisurgut & twplu.t.me
+            "CODE_LINE_TEMPLATE": "Code line template",
+# Написан @lisurgut & twplu.t.me
+            "CODE_LINE_TEMPLATE_SUB": "Use {code} and {name}.",
+# Написан @lisurgut & twplu.t.me
+            "FOOTER_TEXT": "Additional text at the end",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_GRID_ENABLE": "Auto-Grid",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_GRID_ENABLE_SUB": "Automatically adjusts swatch size to fit resolution.",
+# Написан @lisurgut & twplu.t.me
+            "TARGET_RESOLUTION": "Image Resolution",
+# Написан @lisurgut & twplu.t.me
+            "TARGET_RESOLUTION_SUB": "Format: WidthxHeight, e.g. 1920x1080",
+# Написан @lisurgut & twplu.t.me
+            "AI_TEMPERATURE": "AI Temperature (creativity)",
+# Написан @lisurgut & twplu.t.me
+            "AI_TEMPERATURE_SUB": "From 0.0 (precise) to 2.0 (very creative).",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_FONT_COLOR": "Auto font color on swatch",
+# Написан @lisurgut & twplu.t.me
+            "AUTO_FONT_COLOR_SUB": "Automatically chooses black/white color.",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_SHADOW": "Swatch shadow",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_SHADOW_SUB": "Adds a shadow for volume.",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_RADIUS": "Corner radius (px)",
+# Написан @lisurgut & twplu.t.me
+            "SWATCH_RADIUS_SUB": "For 'Rounded Square'.",
+# Написан @lisurgut & twplu.t.me
+            "ADVANCED_HEADER": "Advanced Settings",
+# Написан @lisurgut & twplu.t.me
+            "SHOW_PROCESSING_TIME": "Show generation time",
+# Написан @lisurgut & twplu.t.me
+            "SHOW_PROCESSING_TIME_SUB": "Adds time to the end of the message.",
+# Написан @lisurgut & twplu.t.me
+            "ADD_COLOR_NAMES": "Add color names",
+# Написан @lisurgut & twplu.t.me
+            "ADD_COLOR_NAMES_SUB": "Makes a request to TheColorAPI for each color.",
+# Написан @lisurgut & twplu.t.me
+            "SLOW_MODEL_WARNING": "The current model is responding slowly. Try choosing another one.",
+# Написан @lisurgut & twplu.t.me
+            "CHANGE_MODEL_BUTTON": "Change Model",
+# Написан @lisurgut & twplu.t.me
+            "INTERNET_SHIT": "Your internet is shit, bro",
+# Написан @lisurgut & twplu.t.me
+            "DETAILS_BUTTON": "More details",
+# Написан @lisurgut & twplu.t.me
+            "INTERNET_HELP_TITLE": "Internet problems?",
+# Написан @lisurgut & twplu.t.me
+            "INTERNET_HELP_MESSAGE": "Slow internet can be caused by many reasons. Here are a few tips that might help:\n\n1. Reboot your router and device.\n2. Try switching between Wi-Fi and mobile data.\n3. Check if other applications or devices are using up all the bandwidth.\n4. Use a VPN if your provider restricts access to certain resources.\n5. Contact your internet service provider to diagnose problems on their end.",
+# Написан @lisurgut & twplu.t.me
+            "RECHECK_PING_BUTTON": "Re-check Ping"
+# Написан @lisurgut & twplu.t.me
+        }
+# Написан @lisurgut & twplu.t.me
+    }
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def __init__(self):
+# Написан @lisurgut & twplu.t.me
+        self.language = Locale.getDefault().getLanguage()
+# Написан @lisurgut & twplu.t.me
+        self.language = "ru" if self.language.startswith("ru") else "en"
+# Написан @lisurgut & twplu.t.me
+    
+# Написан @lisurgut & twplu.t.me
+    def get_string(self, key):
+# Написан @lisurgut & twplu.t.me
+        return self.strings[self.language].get(key, self.strings["en"].get(key, key))
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+Z = LocalizationManager()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+def _hex_to_rgb_pb(hex_code: str) -> tuple:
+# Написан @lisurgut & twplu.t.me
+    hex_code = hex_code.lstrip('#')
+# Написан @lisurgut & twplu.t.me
+    return tuple(int(hex_code[i:i+2], 16) for i in (0, 2, 4))
+# Написан @lisurgut & twplu.t.me
+def _rgb_to_hsl_pb(r, g, b) -> tuple:
+# Написан @lisurgut & twplu.t.me
+    r /= 255.0; g /= 255.0; b /= 255.0
+# Написан @lisurgut & twplu.t.me
+    cmax, cmin = max(r, g, b), min(r, g, b)
+# Написан @lisurgut & twplu.t.me
+    diff = cmax - cmin
+# Написан @lisurgut & twplu.t.me
+    h, s, l = 0.0, 0.0, (cmax + cmin) / 2.0
+# Написан @lisurgut & twplu.t.me
+    if diff != 0:
+# Написан @lisurgut & twplu.t.me
+        s = diff / (2.0 - cmax - cmin) if l > 0.5 else diff / (cmax + cmin)
+# Написан @lisurgut & twplu.t.me
+        if cmax == r: h = (g - b) / diff + (6.0 if g < b else 0.0)
+# Написан @lisurgut & twplu.t.me
+        elif cmax == g: h = (b - r) / diff + 2.0
+# Написан @lisurgut & twplu.t.me
+        else: h = (r - g) / diff + 4.0
+# Написан @lisurgut & twplu.t.me
+        h /= 6.0
+# Написан @lisurgut & twplu.t.me
+    return int(h * 360), int(s * 100), int(l * 100)
+# Написан @lisurgut & twplu.t.me
+def _rgb_to_hsv_pb(r, g, b) -> tuple:
+# Написан @lisurgut & twplu.t.me
+    r /= 255.0; g /= 255.0; b /= 255.0
+# Написан @lisurgut & twplu.t.me
+    cmax, cmin = max(r, g, b), min(r, g, b)
+# Написан @lisurgut & twplu.t.me
+    diff = cmax - cmin
+# Написан @lisurgut & twplu.t.me
+    h, s, v = 0.0, 0.0, cmax
+# Написан @lisurgut & twplu.t.me
+    if cmax != 0: s = diff / cmax
+# Написан @lisurgut & twplu.t.me
+    if diff != 0:
+# Написан @lisurgut & twplu.t.me
+        if cmax == r: h = (g - b) / diff + (6.0 if g < b else 0.0)
+# Написан @lisurgut & twplu.t.me
+        elif cmax == g: h = (b - r) / diff + 2.0
+# Написан @lisurgut & twplu.t.me
+        else: h = (r - g) / diff + 4.0
+# Написан @lisurgut & twplu.t.me
+        h /= 6.0
+# Написан @lisurgut & twplu.t.me
+    return int(h * 360), int(s * 100), int(v * 100)
+# Написан @lisurgut & twplu.t.me
+def _rgb_to_cmyk_pb(r, g, b) -> tuple:
+# Написан @lisurgut & twplu.t.me
+    if r == g == b == 0: return 0, 0, 0, 100
+# Написан @lisurgut & twplu.t.me
+    c, m, y = 1.0 - r / 255.0, 1.0 - g / 255.0, 1.0 - b / 255.0
+# Написан @lisurgut & twplu.t.me
+    min_cmy = min(c, m, y)
+# Написан @lisurgut & twplu.t.me
+    k_div = (1.0 - min_cmy)
+# Написан @lisurgut & twplu.t.me
+    c = int(((c - min_cmy) / k_div) * 100) if k_div != 0 else 0
+# Написан @lisurgut & twplu.t.me
+    m = int(((m - min_cmy) / k_div) * 100) if k_div != 0 else 0
+# Написан @lisurgut & twplu.t.me
+    y = int(((y - min_cmy) / k_div) * 100) if k_div != 0 else 0
+# Написан @lisurgut & twplu.t.me
+    k = int(min_cmy * 100)
+# Написан @lisurgut & twplu.t.me
+    return c, m, y, k
+# Написан @lisurgut & twplu.t.me
+def _get_hsv(rgb): return colorsys.rgb_to_hsv(rgb[0]/255, rgb[1]/255, rgb[2]/255)
+# Написан @lisurgut & twplu.t.me
+def _get_hue(hex_code): return _get_hsv(_hex_to_rgb_pb(hex_code))[0]
+# Написан @lisurgut & twplu.t.me
+def _get_saturation(hex_code): return _get_hsv(_hex_to_rgb_pb(hex_code))[1]
+# Написан @lisurgut & twplu.t.me
+def _get_brightness(hex_code): return _get_hsv(_hex_to_rgb_pb(hex_code))[2]
+# Написан @lisurgut & twplu.t.me
+def _get_luminance(rgb_tuple): return (0.299 * rgb_tuple[0] + 0.587 * rgb_tuple[1] + 0.114 * rgb_tuple[2]) / 255
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+class ColorPalettePlugin(BasePlugin):
+# Написан @lisurgut & twplu.t.me
+    separators = ["\n", ", ", " - ", " | ", " • ", "\n\n", " "]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def __init__(self):
+# Написан @lisurgut & twplu.t.me
+        super().__init__()
+# Написан @lisurgut & twplu.t.me
+        self._temp_dir_pb = None
+# Написан @lisurgut & twplu.t.me
+        self._is_processing = False
+# Написан @lisurgut & twplu.t.me
+        self._font_path = None
+# Написан @lisurgut & twplu.t.me
+        self._menu_item = None
+# Написан @lisurgut & twplu.t.me
+        self.model_pings = {}
+# Написан @lisurgut & twplu.t.me
+        self.is_pinging = False
+# Написан @lisurgut & twplu.t.me
+        self._is_showing_slow_warning = False
+# Написан @lisurgut & twplu.t.me
+        self._slow_warning_thread = None
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def on_plugin_load(self):
+# Написан @lisurgut & twplu.t.me
+        self._setup_temp_dir()
+# Написан @lisurgut & twplu.t.me
+        if self._temp_dir_pb:
+# Написан @lisurgut & twplu.t.me
+            self.add_on_send_message_hook()
+# Написан @lisurgut & twplu.t.me
+            threading.Thread(target=self._fetch_font, daemon=True).start()
+# Написан @lisurgut & twplu.t.me
+            if self.get_setting("show_settings_in_menu", True):
+# Написан @lisurgut & twplu.t.me
+                self._add_menu_item()
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] плагин загружен.")
+# Написан @lisurgut & twplu.t.me
+        else:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] ОШИБКА: Не удалось создать временную папку.")
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def on_plugin_unload(self):
+# Написан @lisurgut & twplu.t.me
+        self._remove_menu_item()
+# Написан @lisurgut & twplu.t.me
+        self._stop_slow_warning_loop()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _add_menu_item(self):
+# Написан @lisurgut & twplu.t.me
+        if self._menu_item: return
+# Написан @lisurgut & twplu.t.me
+        self._menu_item = self.add_menu_item(MenuItemData(
+# Написан @lisurgut & twplu.t.me
+            menu_type=MenuItemType.CHAT_ACTION_MENU,
+# Написан @lisurgut & twplu.t.me
+            text=Z.get_string("SETTINGS_HEADER"),
+# Написан @lisurgut & twplu.t.me
+            icon="msg_settings_solar",
+# Написан @lisurgut & twplu.t.me
+            on_click=self._open_settings
+# Написан @lisurgut & twplu.t.me
+        ))
+# Написан @lisurgut & twplu.t.me
+    
+# Написан @lisurgut & twplu.t.me
+    def _remove_menu_item(self):
+# Написан @lisurgut & twplu.t.me
+        if self._menu_item:
+# Написан @lisurgut & twplu.t.me
+            self.remove_menu_item(self._menu_item)
+# Написан @lisurgut & twplu.t.me
+            self._menu_item = None
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _open_settings(self, context):
+# Написан @lisurgut & twplu.t.me
+        fragment = get_last_fragment()
+# Написан @lisurgut & twplu.t.me
+        if not fragment: return
+# Написан @lisurgut & twplu.t.me
+        java_plugin = PluginsController.getInstance().plugins.get(self.id)
+# Написан @lisurgut & twplu.t.me
+        if java_plugin:
+# Написан @lisurgut & twplu.t.me
+            fragment.presentFragment(PluginSettingsActivity(java_plugin))
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _update_model_pings(self):
+# Написан @lisurgut & twplu.t.me
+        self.is_pinging = True
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            for model_api, model_display in zip(AI_MODELS_API, AI_MODELS_DISPLAY):
+# Написан @lisurgut & twplu.t.me
+                try:
+# Написан @lisurgut & twplu.t.me
+                    start_time = time.time()
+# Написан @lisurgut & twplu.t.me
+                    requests.post(API_URL, json={"model": model_api, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}, timeout=5)
+# Написан @lisurgut & twplu.t.me
+                    end_time = time.time()
+# Написан @lisurgut & twplu.t.me
+                    ping_ms = int((end_time - start_time) * 1000)
+# Написан @lisurgut & twplu.t.me
+                    self.model_pings[model_display] = ping_ms
+# Написан @lisurgut & twplu.t.me
+                except Exception:
+# Написан @lisurgut & twplu.t.me
+                    self.model_pings[model_display] = -1 
+# Написан @lisurgut & twplu.t.me
+        finally:
+# Написан @lisurgut & twplu.t.me
+            self.is_pinging = False
+# Написан @lisurgut & twplu.t.me
+            self._on_pings_updated()
+# Написан @lisurgut & twplu.t.me
+    
+# Написан @lisurgut & twplu.t.me
+    def _show_internet_help_dialog(self):
+# Написан @lisurgut & twplu.t.me
+        self._stop_slow_warning_loop()
+# Написан @lisurgut & twplu.t.me
+        fragment = get_last_fragment()
+# Написан @lisurgut & twplu.t.me
+        activity = fragment.getParentActivity()
+# Написан @lisurgut & twplu.t.me
+        if not activity: return
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        builder = AlertDialogBuilder(activity)
+# Написан @lisurgut & twplu.t.me
+        builder.set_title(Z.get_string("INTERNET_HELP_TITLE"))
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        layout = LinearLayout(activity)
+# Написан @lisurgut & twplu.t.me
+        layout.setOrientation(LinearLayout.VERTICAL)
+# Написан @lisurgut & twplu.t.me
+        padding = AndroidUtilities.dp(16)
+# Написан @lisurgut & twplu.t.me
+        layout.setPadding(padding, padding, padding, padding)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        textView = TextView(activity)
+# Написан @lisurgut & twplu.t.me
+        textView.setText(Z.get_string("INTERNET_HELP_MESSAGE"))
+# Написан @lisurgut & twplu.t.me
+        textView.setTextSize(16)
+# Написан @lisurgut & twplu.t.me
+        textView.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        layout.addView(textView)
+# Написан @lisurgut & twplu.t.me
+        builder.set_view(layout)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        builder.set_positive_button("Закрыть", lambda d, w: d.dismiss())
+# Написан @lisurgut & twplu.t.me
+        builder.show()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _on_pings_updated(self):
+# Написан @lisurgut & twplu.t.me
+        def refresh_ui():
+# Написан @lisurgut & twplu.t.me
+            try:
+# Написан @lisurgut & twplu.t.me
+                fragment = get_last_fragment()
+# Написан @lisurgut & twplu.t.me
+                if isinstance(fragment, PluginSettingsActivity) and fragment.getPluginId() == self.id:
+# Написан @lisurgut & twplu.t.me
+                    fragment.rebuild(False)
+# Написан @lisurgut & twplu.t.me
+                    log(f"[{__id__}] Обновление пинга моделей в настройках.")
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                slow_models = 0
+# Написан @lisurgut & twplu.t.me
+                valid_pings = 0
+# Написан @lisurgut & twplu.t.me
+                for ping in self.model_pings.values():
+# Написан @lisurgut & twplu.t.me
+                    if ping > 0:
+# Написан @lisurgut & twplu.t.me
+                        valid_pings += 1
+# Написан @lisurgut & twplu.t.me
+                        if ping > 150:
+# Написан @lisurgut & twplu.t.me
+                            slow_models += 1
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                if valid_pings > 0 and (slow_models / valid_pings) >= 0.8:
+# Написан @lisurgut & twplu.t.me
+                    self._start_slow_warning_loop()
+# Написан @lisurgut & twplu.t.me
+                else:
+# Написан @lisurgut & twplu.t.me
+                    self._stop_slow_warning_loop()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            except Exception as e:
+# Написан @lisurgut & twplu.t.me
+                log(f"[{__id__}] Ошибка при обновлении настроек или проверке пинга: {e}")
+# Написан @lisurgut & twplu.t.me
+        
+# Написан @lisurgut & twplu.t.me
+        run_on_ui_thread(refresh_ui)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _slow_warning_loop(self):
+# Написан @lisurgut & twplu.t.me
+        while self._is_showing_slow_warning:
+# Написан @lisurgut & twplu.t.me
+            run_on_ui_thread(lambda: BulletinHelper.show_with_button(
+# Написан @lisurgut & twplu.t.me
+                text=Z.get_string("INTERNET_SHIT"),
+# Написан @lisurgut & twplu.t.me
+                icon_res_id=R.raw.error,
+# Написан @lisurgut & twplu.t.me
+                button_text=Z.get_string("DETAILS_BUTTON"),
+# Написан @lisurgut & twplu.t.me
+                on_click=self._show_internet_help_dialog
+# Написан @lisurgut & twplu.t.me
+            ))
+# Написан @lisurgut & twplu.t.me
+            time.sleep(5)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _start_slow_warning_loop(self):
+# Написан @lisurgut & twplu.t.me
+        if not self._is_showing_slow_warning:
+# Написан @lisurgut & twplu.t.me
+            self._is_showing_slow_warning = True
+# Написан @lisurgut & twplu.t.me
+            if self._slow_warning_thread is None or not self._slow_warning_thread.is_alive():
+# Написан @lisurgut & twplu.t.me
+                self._slow_warning_thread = threading.Thread(target=self._slow_warning_loop, daemon=True)
+# Написан @lisurgut & twplu.t.me
+                self._slow_warning_thread.start()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _stop_slow_warning_loop(self):
+# Написан @lisurgut & twplu.t.me
+        self._is_showing_slow_warning = False
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _start_ping_thread(self):
+# Написан @lisurgut & twplu.t.me
+        if not self.is_pinging:
+# Написан @lisurgut & twplu.t.me
+            threading.Thread(target=self._update_model_pings, daemon=True).start()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _handle_reping_click(self):
+# Написан @lisurgut & twplu.t.me
+        self.model_pings.clear()
+# Написан @lisurgut & twplu.t.me
+        fragment = get_last_fragment()
+# Написан @lisurgut & twplu.t.me
+        if isinstance(fragment, PluginSettingsActivity) and fragment.getPluginId() == self.id:
+# Написан @lisurgut & twplu.t.me
+            fragment.rebuild(False)
+# Написан @lisurgut & twplu.t.me
+        BulletinHelper.show_info("Проверяю пинг моделей AI...")
+# Написан @lisurgut & twplu.t.me
+        self._start_ping_thread()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _create_ai_settings(self):
+# Написан @lisurgut & twplu.t.me
+        if not self.model_pings and not self.is_pinging:
+# Написан @lisurgut & twplu.t.me
+            self._start_ping_thread()
+# Написан @lisurgut & twplu.t.me
+        
+# Написан @lisurgut & twplu.t.me
+        display_items = []
+# Написан @lisurgut & twplu.t.me
+        for name in AI_MODELS_DISPLAY:
+# Написан @lisurgut & twplu.t.me
+            ping = self.model_pings.get(name)
+# Написан @lisurgut & twplu.t.me
+            if ping is not None:
+# Написан @lisurgut & twplu.t.me
+                display_items.append(f"{name} : {ping}ms" if ping > 0 else f"{name} : N/A")
+# Написан @lisurgut & twplu.t.me
+            else:
+# Написан @lisurgut & twplu.t.me
+                display_items.append(f"{name} : Pinging...")
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        return [
+# Написан @lisurgut & twplu.t.me
+            Input(key="command_prefix", text=Z.get_string("CMD_PREFIX"), default=".palette", icon="input_bot1"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="title_template", text=Z.get_string("TITLE_TEMPLATE"), default="*«{prompt}»*", icon="msg_edit", subtext=Z.get_string("TITLE_TEMPLATE_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="ai_model", text=Z.get_string("AI_MODEL"), default=0, items=display_items, icon="msg_folders_bots"),
+# Написан @lisurgut & twplu.t.me
+            Text(text=Z.get_string("RECHECK_PING_BUTTON"), icon="msg_update", accent=True, on_click=lambda v: self._handle_reping_click()),
+# Написан @lisurgut & twplu.t.me
+            Input(key="color_count", text=Z.get_string("COLOR_COUNT"), default="15", icon="msg_colors"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="ai_temperature", text=Z.get_string("AI_TEMPERATURE"), default="0.8", icon="msg_temp", subtext=Z.get_string("AI_TEMPERATURE_SUB")),
+# Написан @lisurgut & twplu.t.me
+        ]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _create_image_gen_settings(self):
+# Написан @lisurgut & twplu.t.me
+        return [
+# Написан @lisurgut & twplu.t.me
+            Input(key="command_from_image", text=Z.get_string("CMD_FROM_IMAGE"), default=".pfrom", icon="msg_photo_add"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="title_from_image_template", text=Z.get_string("TITLE_FROM_IMAGE_TEMPLATE"), default="*Изображение*", icon="msg_edit"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="extract_color_count", text=Z.get_string("EXTRACT_COLOR_COUNT"), default="7", icon="msg_colors"),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="quantization_method", text=Z.get_string("QUANTIZE_METHOD"), default=0, items=Z.get_string("QUANTIZE_ITEMS"), icon="msg_palette"),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="color_sort_method", text=Z.get_string("COLOR_SORT"), default=0, items=Z.get_string("COLOR_SORT_ITEMS"), icon="msg_list"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="background_blur_radius", text=Z.get_string("BLUR_RADIUS"), default="50", icon="msg_spoiler"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="background_darkness", text=Z.get_string("BG_DARKNESS"), default="40", icon="msg_brightness_low"),
+# Написан @lisurgut & twplu.t.me
+        ]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _create_style_settings(self):
+# Написан @lisurgut & twplu.t.me
+        return [
+# Написан @lisurgut & twplu.t.me
+            Switch(key="auto_grid_enable", text=Z.get_string("AUTO_GRID_ENABLE"), default=True, icon="msg_customize", subtext=Z.get_string("AUTO_GRID_ENABLE_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Input(key="target_resolution", text=Z.get_string("TARGET_RESOLUTION"), default="1280x720", icon="msg_photo_crop", subtext=Z.get_string("TARGET_RESOLUTION_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="palette_layout", text=Z.get_string("PALETTE_LAYOUT"), default=0, items=Z.get_string("LAYOUT_ITEMS"), icon="msg_msgbubble2"),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="swatch_shape", text=Z.get_string("SWATCH_SHAPE"), default=0, items=Z.get_string("SHAPE_ITEMS"), icon="msg_gif_solar"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="swatch_radius", text=Z.get_string("SWATCH_RADIUS"), default="20", icon="msg_stories_corner", subtext=Z.get_string("SWATCH_RADIUS_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Input(key="square_size", text=Z.get_string("SQUARE_SIZE"), default="150", icon="msg_photo_crop"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="padding", text=Z.get_string("PADDING"), default="20", icon="msg_switch"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="outer_padding", text=Z.get_string("OUTER_PADDING"), default="50", icon="arrow_more_solar"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="solid_bg_color", text=Z.get_string("SOLID_BG_COLOR"), default="", icon="msg_theme", subtext=Z.get_string("SOLID_BG_COLOR_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="swatch_border_enable", text=Z.get_string("BORDER_ENABLE"), default=False, icon="menu_select_quote_solar"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="swatch_border_width", text=Z.get_string("BORDER_WIDTH"), default="5", icon="msg_header_draw"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="swatch_border_color", text=Z.get_string("BORDER_COLOR"), default="#FFFFFF", icon="msg_palette"),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="swatch_shadow", text=Z.get_string("SWATCH_SHADOW"), default=False, icon="msg_shadow", subtext=Z.get_string("SWATCH_SHADOW_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="show_codes_on_image", text=Z.get_string("CODES_ON_IMAGE"), default=True, icon="msg_photo_text2"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="font_size_on_image", text=Z.get_string("FONT_SIZE"), default="18", icon="msg_photo_text_regular"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="font_color_on_image", text=Z.get_string("FONT_COLOR"), default="#FFFFFF", icon="msg_palette"),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="auto_font_color", text=Z.get_string("AUTO_FONT_COLOR"), default=False, icon="msg_text_color", subtext=Z.get_string("AUTO_FONT_COLOR_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="image_format", text=Z.get_string("IMAGE_FORMAT"), default=0, items=Z.get_string("FORMAT_ITEMS"), icon="msg_camera_solar"),
+# Написан @lisurgut & twplu.t.me
+        ]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _create_caption_settings(self):
+# Написан @lisurgut & twplu.t.me
+        return [
+# Написан @lisurgut & twplu.t.me
+            Selector(key="send_mode", text=Z.get_string("SEND_MODE"), default=1, items=Z.get_string("SEND_MODE_ITEMS"), icon="msg_share"),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="code_format", text=Z.get_string("CODE_FORMAT"), default=0, items=COLOR_FORMATS_DISPLAY_PB, icon="msg_pin_code"),
+# Написан @lisurgut & twplu.t.me
+            Selector(key="code_separator", text=Z.get_string("CODE_SEPARATOR"), default=6, items=Z.get_string("SEPARATOR_ITEMS"), icon="msg_list"),
+# Написан @lisurgut & twplu.t.me
+            Input(key="code_line_template", text=Z.get_string("CODE_LINE_TEMPLATE"), default="{code}", icon="msg_pin_code", subtext=Z.get_string("CODE_LINE_TEMPLATE_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Input(key="custom_footer_text", text=Z.get_string("FOOTER_TEXT"), default="", icon="msg_edit"),
+# Написан @lisurgut & twplu.t.me
+        ]
+# Написан @lisurgut & twplu.t.me
+        
+# Написан @lisurgut & twplu.t.me
+    def _create_advanced_settings(self):
+# Написан @lisurgut & twplu.t.me
+        return [
+# Написан @lisurgut & twplu.t.me
+            Switch(key="add_color_names", text=Z.get_string("ADD_COLOR_NAMES"), default=False, icon="msg_info", subtext=Z.get_string("ADD_COLOR_NAMES_SUB")),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="show_processing_time", text=Z.get_string("SHOW_PROCESSING_TIME"), default=False, icon="msg_timer", subtext=Z.get_string("SHOW_PROCESSING_TIME_SUB")),
+# Написан @lisurgut & twplu.t.me
+        ]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def create_settings(self):
+# Написан @lisurgut & twplu.t.me
+        return [
+# Написан @lisurgut & twplu.t.me
+            Header(text=Z.get_string("SETTINGS_HEADER")),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="enabled", text=Z.get_string("ENABLE_PLUGIN"), default=True, icon="floating_check"),
+# Написан @lisurgut & twplu.t.me
+            Switch(key="show_settings_in_menu", text=Z.get_string("SHOW_SETTINGS_IN_MENU"), default=True, icon="msg_reorder", on_change=lambda v: self._add_menu_item() if v else self._remove_menu_item()),
+# Написан @lisurgut & twplu.t.me
+            Divider(),
+# Написан @lisurgut & twplu.t.me
+            Text(text=Z.get_string("AI_HEADER"), icon="msg_folders_bots", create_sub_fragment=self._create_ai_settings),
+# Написан @lisurgut & twplu.t.me
+            Divider(),
+# Написан @lisurgut & twplu.t.me
+            Text(text=Z.get_string("IMAGE_HEADER"), icon="msg_photo_add", create_sub_fragment=self._create_image_gen_settings),
+# Написан @lisurgut & twplu.t.me
+            Divider(),
+# Написан @lisurgut & twplu.t.me
+            Text(text=Z.get_string("IMAGE_STYLE_HEADER"), icon="msg_palette", create_sub_fragment=self._create_style_settings),
+# Написан @lisurgut & twplu.t.me
+            Divider(),
+# Написан @lisurgut & twplu.t.me
+            Text(text=Z.get_string("CAPTION_HEADER"), icon="msg_edit", create_sub_fragment=self._create_caption_settings),
+# Написан @lisurgut & twplu.t.me
+            Divider(),
+# Написан @lisurgut & twplu.t.me
+            Text(text=Z.get_string("ADVANCED_HEADER"), icon="msg_settings_14", create_sub_fragment=self._create_advanced_settings),
+# Написан @lisurgut & twplu.t.me
+        ]
+# Написан @lisurgut & twplu.t.me
+    
+# Написан @lisurgut & twplu.t.me
+    def _setup_temp_dir(self):
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            base_dir = ApplicationLoader.getFilesDirFixed()
+# Написан @lisurgut & twplu.t.me
+            if not base_dir: return
+# Написан @lisurgut & twplu.t.me
+            temp_dir = File(base_dir, TEMP_DIR_NAME)
+# Написан @lisurgut & twplu.t.me
+            if not temp_dir.exists():
+# Написан @lisurgut & twplu.t.me
+                temp_dir.mkdirs()
+# Написан @lisurgut & twplu.t.me
+            self._temp_dir_pb = temp_dir
+# Написан @lisurgut & twplu.t.me
+            self._font_path = File(temp_dir, FONT_NAME).getAbsolutePath()
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка при настройке временной папки: {e}")
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _fetch_font(self):
+# Написан @lisurgut & twplu.t.me
+        if not self._font_path or os.path.exists(self._font_path): return
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            response = requests.get(FONT_URL, timeout=15)
+# Написан @lisurgut & twplu.t.me
+            response.raise_for_status()
+# Написан @lisurgut & twplu.t.me
+            with open(self._font_path, "wb") as f: f.write(response.content)
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Шрифт успешно загружен в {self._font_path}")
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Не удалось загрузить шрифт: {e}")
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _get_font(self, size: int):
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            if self._font_path and os.path.exists(self._font_path):
+# Написан @lisurgut & twplu.t.me
+                return ImageFont.truetype(self._font_path, size)
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка загрузки кастомного шрифта: {e}. Используется шрифт по умолчанию.")
+# Написан @lisurgut & twplu.t.me
+        return ImageFont.load_default()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _format_code(self, hex_code: str) -> str:
+# Написан @lisurgut & twplu.t.me
+        format_index_pb = self.get_setting("code_format", 0)
+# Написан @lisurgut & twplu.t.me
+        r_pb, g_pb, b_pb = _hex_to_rgb_pb(hex_code)
+# Написан @lisurgut & twplu.t.me
+        if format_index_pb == 0: return hex_code
+# Написан @lisurgut & twplu.t.me
+        if format_index_pb == 1: return f"{r_pb},{g_pb},{b_pb}"
+# Написан @lisurgut & twplu.t.me
+        if format_index_pb == 2: h_pb, s_pb, l_pb = _rgb_to_hsl_pb(r_pb, g_pb, b_pb); return f"{h_pb},{s_pb},{l_pb}"
+# Написан @lisurgut & twplu.t.me
+        if format_index_pb == 3: h_pb, s_pb, v_pb = _rgb_to_hsv_pb(r_pb, g_pb, b_pb); return f"{h_pb},{s_pb},{v_pb}"
+# Написан @lisurgut & twplu.t.me
+        if format_index_pb == 4: c_pb, m_pb, y_pb, k_pb = _rgb_to_cmyk_pb(r_pb, g_pb, b_pb); return f"{c_pb},{m_pb},{y_pb},{k_pb}"
+# Написан @lisurgut & twplu.t.me
+        if format_index_pb == 5: return f"rgb({r_pb},{g_pb},{b_pb})"
+# Написан @lisurgut & twplu.t.me
+        return hex_code
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+# Написан @lisurgut & twplu.t.me
+        if not self.get_setting("enabled", True): return HookResult()
+# Написан @lisurgut & twplu.t.me
+        if not hasattr(params, 'message') or not isinstance(params.message, str): return HookResult()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        msg_text_pb = params.message.strip()
+# Написан @lisurgut & twplu.t.me
+        
+# Написан @lisurgut & twplu.t.me
+        if self._is_processing:
+# Написан @lisurgut & twplu.t.me
+            BulletinHelper.show_error("Подождите, предыдущий запрос еще выполняется.")
+# Написан @lisurgut & twplu.t.me
+            return HookResult(strategy=HookStrategy.CANCEL)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        command_prefix = self.get_setting("command_prefix", ".palette").strip()
+# Написан @lisurgut & twplu.t.me
+        if msg_text_pb.lower().startswith(command_prefix.lower() + " "):
+# Написан @lisurgut & twplu.t.me
+            prompt_pb = msg_text_pb[len(command_prefix) + 1:].strip()
+# Написан @lisurgut & twplu.t.me
+            if not prompt_pb:
+# Написан @lisurgut & twplu.t.me
+                BulletinHelper.show_error(f"Укажите запрос.\nПример: {command_prefix} закат в горах")
+# Написан @lisurgut & twplu.t.me
+                return HookResult(strategy=HookStrategy.CANCEL)
+# Написан @lisurgut & twplu.t.me
+            run_on_ui_thread(lambda: BulletinHelper.show_info(f"Генерирую палитру для «{prompt_pb}»..."))
+# Написан @lisurgut & twplu.t.me
+            threading.Thread(target=self._generate_and_send_ai, args=(prompt_pb, params), daemon=True).start()
+# Написан @lisurgut & twplu.t.me
+            return HookResult(strategy=HookStrategy.CANCEL)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        image_command_prefix = self.get_setting("command_from_image", ".pfrom").strip()
+# Написан @lisurgut & twplu.t.me
+        if msg_text_pb.lower().startswith(image_command_prefix.lower()):
+# Написан @lisurgut & twplu.t.me
+            if not params.replyToMsg or not self._has_photo(params.replyToMsg):
+# Написан @lisurgut & twplu.t.me
+                BulletinHelper.show_error("Ответьте на сообщение с фото этой командой.")
+# Написан @lisurgut & twplu.t.me
+                return HookResult(strategy=HookStrategy.CANCEL)
+# Написан @lisurgut & twplu.t.me
+            run_on_ui_thread(lambda: BulletinHelper.show_info("Извлекаю цвета из изображения..."))
+# Написан @lisurgut & twplu.t.me
+            threading.Thread(target=self._generate_from_image_and_send, args=(params,), daemon=True).start()
+# Написан @lisurgut & twplu.t.me
+            return HookResult(strategy=HookStrategy.CANCEL)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        return HookResult()
+# Написан @lisurgut & twplu.t.me
+    
+# Написан @lisurgut & twplu.t.me
+    def _sort_colors(self, hex_codes: list) -> list:
+# Написан @lisurgut & twplu.t.me
+        sort_method = self.get_setting("color_sort_method", 0)
+# Написан @lisurgut & twplu.t.me
+        if sort_method == 0: return hex_codes
+# Написан @lisurgut & twplu.t.me
+        if sort_method == 1: return sorted(hex_codes, key=_get_hue)
+# Написан @lisurgut & twplu.t.me
+        if sort_method == 2: return sorted(hex_codes, key=_get_brightness)
+# Написан @lisurgut & twplu.t.me
+        if sort_method == 3: return sorted(hex_codes, key=_get_saturation)
+# Написан @lisurgut & twplu.t.me
+        return hex_codes
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _show_slow_model_warning(self):
+# Написан @lisurgut & twplu.t.me
+        run_on_ui_thread(lambda: BulletinHelper.show_with_button(
+# Написан @lisurgut & twplu.t.me
+            text=Z.get_string("SLOW_MODEL_WARNING"),
+# Написан @lisurgut & twplu.t.me
+            icon_res_id=R.raw.error,
+# Написан @lisurgut & twplu.t.me
+            button_text=Z.get_string("CHANGE_MODEL_BUTTON"),
+# Написан @lisurgut & twplu.t.me
+            on_click=lambda: self._open_settings(None)
+# Написан @lisurgut & twplu.t.me
+        ))
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _generate_and_send_ai(self, prompt: str, params: Any):
+# Написан @lisurgut & twplu.t.me
+        start_time = time.time()
+# Написан @lisurgut & twplu.t.me
+        self._is_processing = True
+# Написан @lisurgut & twplu.t.me
+        request_finished_event = threading.Event()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        def _check_timeout():
+# Написан @lisurgut & twplu.t.me
+            if not request_finished_event.wait(15):
+# Написан @lisurgut & twplu.t.me
+                self._show_slow_model_warning()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        threading.Thread(target=_check_timeout, daemon=True).start()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            hex_codes = self._get_hex_codes_from_ai(prompt)
+# Написан @lisurgut & twplu.t.me
+            if not hex_codes:
+# Написан @lisurgut & twplu.t.me
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось получить цвета от AI."))
+# Написан @lisurgut & twplu.t.me
+                return
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            image_path_pb = self._create_palette_image(hex_codes)
+# Написан @lisurgut & twplu.t.me
+            if not image_path_pb:
+# Написан @lisurgut & twplu.t.me
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось создать изображение палитры."))
+# Написан @lisurgut & twplu.t.me
+                return
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            title_pb = self.get_setting("title_template", "*«{prompt}»*").format(prompt=prompt)
+# Написан @lisurgut & twplu.t.me
+            self._send_results(params, image_path_pb, hex_codes, title_pb, start_time)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка в потоке генерации AI: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+        finally:
+# Написан @lisurgut & twplu.t.me
+            self._is_processing = False
+# Написан @lisurgut & twplu.t.me
+            request_finished_event.set()
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _generate_from_image_and_send(self, params: Any):
+# Написан @lisurgut & twplu.t.me
+        start_time = time.time()
+# Написан @lisurgut & twplu.t.me
+        self._is_processing = True
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            replied_msg_pb = params.replyToMsg
+# Написан @lisurgut & twplu.t.me
+            photo_path_pb = self._download_photo_sync(replied_msg_pb)
+# Написан @lisurgut & twplu.t.me
+            if not photo_path_pb:
+# Написан @lisurgut & twplu.t.me
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось загрузить фото."))
+# Написан @lisurgut & twplu.t.me
+                return
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            count_pb = int(self.get_setting("extract_color_count", "7"))
+# Написан @lisurgut & twplu.t.me
+            quant_method = self.get_setting("quantization_method", 0)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            hex_codes_pb = self._extract_colors_from_image(photo_path_pb, count_pb, quant_method)
+# Написан @lisurgut & twplu.t.me
+            hex_codes_pb = self._sort_colors(hex_codes_pb)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            if not hex_codes_pb:
+# Написан @lisurgut & twplu.t.me
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось извлечь цвета."))
+# Написан @lisurgut & twplu.t.me
+                return
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            image_path_final_pb = self._create_palette_image(hex_codes_pb, bg_image_path=photo_path_pb)
+# Написан @lisurgut & twplu.t.me
+            if not image_path_final_pb:
+# Написан @lisurgut & twplu.t.me
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось создать изображение."))
+# Написан @lisurgut & twplu.t.me
+                return
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            title_pb = self.get_setting("title_from_image_template", "*Изображение*")
+# Написан @lisurgut & twplu.t.me
+            self._send_results(params, image_path_final_pb, hex_codes_pb, title_pb, start_time)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка в потоке генерации из фото: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+        finally:
+# Написан @lisurgut & twplu.t.me
+            self._is_processing = False
+# Написан @lisurgut & twplu.t.me
+    
+# Написан @lisurgut & twplu.t.me
+    def _create_palette_image(self, hex_codes: list, bg_image_path: str = None) -> str:
+# Написан @lisurgut & twplu.t.me
+        if not self._temp_dir_pb or not hex_codes: return ""
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            auto_grid_enabled = self.get_setting("auto_grid_enable", True)
+# Написан @lisurgut & twplu.t.me
+            layout_idx = self.get_setting("palette_layout", 0)
+# Написан @lisurgut & twplu.t.me
+            shape_idx = self.get_setting("swatch_shape", 0)
+# Написан @lisurgut & twplu.t.me
+            padding = int(self.get_setting("padding", "20"))
+# Написан @lisurgut & twplu.t.me
+            outer_padding = int(self.get_setting("outer_padding", "50"))
+# Написан @lisurgut & twplu.t.me
+            show_codes = self.get_setting("show_codes_on_image", True)
+# Написан @lisurgut & twplu.t.me
+            font_size = int(self.get_setting("font_size_on_image", "18"))
+# Написан @lisurgut & twplu.t.me
+            font_color_hex = self.get_setting("font_color_on_image", "#FFFFFF")
+# Написан @lisurgut & twplu.t.me
+            auto_font_color = self.get_setting("auto_font_color", False)
+# Написан @lisurgut & twplu.t.me
+            border_enabled = self.get_setting("swatch_border_enable", False)
+# Написан @lisurgut & twplu.t.me
+            border_width = int(self.get_setting("swatch_border_width", "5"))
+# Написан @lisurgut & twplu.t.me
+            border_color = self.get_setting("swatch_border_color", "#FFFFFF")
+# Написан @lisurgut & twplu.t.me
+            shadow_enabled = self.get_setting("swatch_shadow", False)
+# Написан @lisurgut & twplu.t.me
+            radius = int(self.get_setting("swatch_radius", "20"))
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            font = self._get_font(font_size)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            text_height_per_swatch = 0
+# Написан @lisurgut & twplu.t.me
+            if show_codes:
+# Написан @lisurgut & twplu.t.me
+                sample_text_for_measure = self._format_code("#000000")
+# Написан @lisurgut & twplu.t.me
+                bbox_sample_text = font.getbbox(sample_text_for_measure)
+# Написан @lisurgut & twplu.t.me
+                actual_text_content_height = bbox_sample_text[3] - bbox_sample_text[1]
+# Написан @lisurgut & twplu.t.me
+                text_height_per_swatch = actual_text_content_height + 10
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            num_colors = len(hex_codes)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            if auto_grid_enabled and layout_idx == 0:
+# Написан @lisurgut & twplu.t.me
+                try:
+# Написан @lisurgut & twplu.t.me
+                    res_str = self.get_setting("target_resolution", "1280x720")
+# Написан @lisurgut & twplu.t.me
+                    canvas_w, canvas_h = map(int, res_str.lower().split('x'))
+# Написан @lisurgut & twplu.t.me
+                except (ValueError, IndexError):
+# Написан @lisurgut & twplu.t.me
+                    canvas_w, canvas_h = 1280, 720
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                available_w = canvas_w - 2 * outer_padding
+# Написан @lisurgut & twplu.t.me
+                available_h = canvas_h - 2 * outer_padding
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+                best_layout = {'cols': 1, 'rows': num_colors, 'size': 0}
+# Написан @lisurgut & twplu.t.me
+                for cols_candidate in range(1, num_colors + 1):
+# Написан @lisurgut & twplu.t.me
+                    rows_candidate = math.ceil(num_colors / cols_candidate)
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    size_w = (available_w - (cols_candidate - 1) * padding) / cols_candidate
+# Написан @lisurgut & twplu.t.me
+                    size_h = (available_h - (rows_candidate - 1) * padding) / rows_candidate - text_height_per_swatch
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    current_size = min(size_w, size_h)
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    if current_size > best_layout['size']:
+# Написан @lisurgut & twplu.t.me
+                        best_layout['size'] = current_size
+# Написан @lisurgut & twplu.t.me
+                        best_layout['cols'] = cols_candidate
+# Написан @lisurgut & twplu.t.me
+                        best_layout['rows'] = rows_candidate
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+                square_size = int(best_layout['size'])
+# Написан @lisurgut & twplu.t.me
+                cols = best_layout['cols']
+# Написан @lisurgut & twplu.t.me
+                rows = best_layout['rows']
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                content_w = (square_size * cols) + (padding * (cols - 1))
+# Написан @lisurgut & twplu.t.me
+                content_h = rows * (square_size + text_height_per_swatch) + (padding * (rows - 1))
+# Написан @lisurgut & twplu.t.me
+                final_outer_padding_w = (canvas_w - content_w) / 2
+# Написан @lisurgut & twplu.t.me
+                final_outer_padding_h = (canvas_h - content_h) / 2
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            else:
+# Написан @lisurgut & twplu.t.me
+                square_size = int(self.get_setting("square_size", "150"))
+# Написан @lisurgut & twplu.t.me
+                final_outer_padding_w = outer_padding
+# Написан @lisurgut & twplu.t.me
+                final_outer_padding_h = outer_padding
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+                if layout_idx == 0:
+# Написан @lisurgut & twplu.t.me
+                    cols = int(math.ceil(math.sqrt(num_colors)))
+# Написан @lisurgut & twplu.t.me
+                    rows = int(math.ceil(num_colors / cols))
+# Написан @lisurgut & twplu.t.me
+                    content_w = (square_size * cols) + (padding * (cols - 1))
+# Написан @lisurgut & twplu.t.me
+                    content_h = rows * (square_size + text_height_per_swatch) + (padding * (rows - 1))
+# Написан @lisurgut & twplu.t.me
+                elif layout_idx == 1:
+# Написан @lisurgut & twplu.t.me
+                    cols, rows = num_colors, 1
+# Написан @lisurgut & twplu.t.me
+                    content_w = (square_size * cols) + (padding * (cols - 1))
+# Написан @lisurgut & twplu.t.me
+                    content_h = square_size + text_height_per_swatch
+# Написан @lisurgut & twplu.t.me
+                else:
+# Написан @lisurgut & twplu.t.me
+                    cols, rows = 1, num_colors
+# Написан @lisurgut & twplu.t.me
+                    content_w = square_size
+# Написан @lisurgut & twplu.t.me
+                    content_h = (square_size + text_height_per_swatch) * rows + (padding * (rows - 1))
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                canvas_w = content_w + outer_padding * 2
+# Написан @lisurgut & twplu.t.me
+                canvas_h = content_h + outer_padding * 2
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            if bg_image_path and os.path.exists(bg_image_path):
+# Написан @lisurgut & twplu.t.me
+                bg_img = Image.open(bg_image_path).convert("RGB")
+# Написан @lisurgut & twplu.t.me
+                resized_bg = ImageOps.fit(bg_img, (canvas_w, canvas_h), Image.Resampling.LANCZOS)
+# Написан @lisurgut & twplu.t.me
+                blur = int(self.get_setting("background_blur_radius", "50"))
+# Написан @lisurgut & twplu.t.me
+                if blur > 0: resized_bg = resized_bg.filter(ImageFilter.GaussianBlur(radius=blur))
+# Написан @lisurgut & twplu.t.me
+                darkness = int(self.get_setting("background_darkness", "40"))
+# Написан @lisurgut & twplu.t.me
+                if darkness > 0: resized_bg = ImageEnhance.Brightness(resized_bg).enhance(1.0 - darkness / 100.0)
+# Написан @lisurgut & twplu.t.me
+                final_canvas = resized_bg
+# Написан @lisurgut & twplu.t.me
+            else:
+# Написан @lisurgut & twplu.t.me
+                bg_color = self.get_setting("solid_bg_color", "") or "#000000"
+# Написан @lisurgut & twplu.t.me
+                final_canvas = Image.new("RGB", (canvas_w, canvas_h), bg_color)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            shadow_layer = Image.new('RGBA', final_canvas.size, (0,0,0,0))
+# Написан @lisurgut & twplu.t.me
+            shadow_draw = ImageDraw.Draw(shadow_layer)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            for i, code in enumerate(hex_codes):
+# Написан @lisurgut & twplu.t.me
+                if layout_idx == 0: col, row = i % cols, i // cols
+# Написан @lisurgut & twplu.t.me
+                elif layout_idx == 1: col, row = i, 0
+# Написан @lisurgut & twplu.t.me
+                else: col, row = 0, i
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+                x0 = final_outer_padding_w + col * (square_size + padding)
+# Написан @lisurgut & twplu.t.me
+                y0 = final_outer_padding_h + row * (square_size + text_height_per_swatch + padding)
+# Написан @lisurgut & twplu.t.me
+                x1, y1 = x0 + square_size, y0 + square_size
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                if shadow_enabled:
+# Написан @lisurgut & twplu.t.me
+                    shadow_offset = int(square_size * 0.05)
+# Написан @lisurgut & twplu.t.me
+                    s_x0, s_y0, s_x1, s_y1 = x0 + shadow_offset, y0 + shadow_offset, x1 + shadow_offset, y1 + shadow_offset
+# Написан @lisurgut & twplu.t.me
+                    shadow_color = (0, 0, 0, 100)
+# Написан @lisurgut & twplu.t.me
+                    if shape_idx == 0: shadow_draw.rounded_rectangle([s_x0, s_y0, s_x1, s_y1], radius=radius, fill=shadow_color)
+# Написан @lisurgut & twplu.t.me
+                    elif shape_idx == 1: shadow_draw.rectangle([s_x0, s_y0, s_x1, s_y1], fill=shadow_color)
+# Написан @lisurgut & twplu.t.me
+                    elif shape_idx == 2: shadow_draw.ellipse([s_x0, s_y0, s_x1, s_y1], fill=shadow_color)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            if shadow_enabled:
+# Написан @lisurgut & twplu.t.me
+                shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=5))
+# Написан @lisurgut & twplu.t.me
+                final_canvas.paste(shadow_layer, (0,0), shadow_layer)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            draw = ImageDraw.Draw(final_canvas)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            for i, code in enumerate(hex_codes):
+# Написан @lisurgut & twplu.t.me
+                if layout_idx == 0: col, row = i % cols, i // cols
+# Написан @lisurgut & twplu.t.me
+                elif layout_idx == 1: col, row = i, 0
+# Написан @lisurgut & twplu.t.me
+                else: col, row = 0, i
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+                x0 = final_outer_padding_w + col * (square_size + padding)
+# Написан @lisurgut & twplu.t.me
+                y0 = final_outer_padding_h + row * (square_size + text_height_per_swatch + padding)
+# Написан @lisurgut & twplu.t.me
+                x1, y1 = x0 + square_size, y0 + square_size
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                if border_enabled:
+# Написан @lisurgut & twplu.t.me
+                    b_x0, b_y0 = x0 - border_width, y0 - border_width
+# Написан @lisurgut & twplu.t.me
+                    b_x1, b_y1 = x1 + border_width, y1 + border_width
+# Написан @lisurgut & twplu.t.me
+                    if shape_idx == 0: draw.rounded_rectangle([b_x0, b_y0, b_x1, b_y1], radius=radius + border_width, fill=border_color)
+# Написан @lisurgut & twplu.t.me
+                    elif shape_idx == 1: draw.rectangle([b_x0, b_y0, b_x1, b_y1], fill=border_color)
+# Написан @lisurgut & twplu.t.me
+                    elif shape_idx == 2: draw.ellipse([b_x0, b_y0, b_x1, b_y1], fill=border_color)
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                if shape_idx == 0: draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=code)
+# Написан @lisurgut & twplu.t.me
+                elif shape_idx == 1: draw.rectangle([x0, y0, x1, y1], fill=code)
+# Написан @lisurgut & twplu.t.me
+                elif shape_idx == 2: draw.ellipse([x0, y0, x1, y1], fill=code)
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                if show_codes:
+# Написан @lisurgut & twplu.t.me
+                    text_to_draw = self._format_code(code)
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    current_text_bbox = font.getbbox(text_to_draw)
+# Написан @lisurgut & twplu.t.me
+                    text_w = current_text_bbox[2] - current_text_bbox[0]
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    text_x = x0 + (square_size - text_w) / 2
+# Написан @lisurgut & twplu.t.me
+                    text_y_draw_origin = (y1 + 5) - current_text_bbox[1]
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    final_font_color = font_color_hex
+# Написан @lisurgut & twplu.t.me
+                    if auto_font_color:
+# Написан @lisurgut & twplu.t.me
+                        final_font_color = "#000000" if _get_luminance(_hex_to_rgb_pb(code)) > 0.5 else "#FFFFFF"
+# Написан @lisurgut & twplu.t.me
+                    
+# Написан @lisurgut & twplu.t.me
+                    draw.text((text_x, text_y_draw_origin), text_to_draw, font=font, fill=final_font_color)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            img_format = self.get_setting("image_format", 0)
+# Написан @lisurgut & twplu.t.me
+            file_ext = "png" if img_format == 0 else "jpg"
+# Написан @lisurgut & twplu.t.me
+            save_format = "PNG" if img_format == 0 else "JPEG"
+# Написан @lisurgut & twplu.t.me
+            path = File(self._temp_dir_pb, f"palette_{uuid.uuid4()}.{file_ext}").getAbsolutePath()
+# Написан @lisurgut & twplu.t.me
+            final_canvas.save(path, save_format, quality=95 if save_format == "JPEG" else None)
+# Написан @lisurgut & twplu.t.me
+            return path
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка при создании изображения палитры: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+            return ""
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _get_hex_codes_from_ai(self, prompt: str) -> list:
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            color_count = int(self.get_setting("color_count", "15"))
+# Написан @lisurgut & twplu.t.me
+            ai_model = AI_MODELS_API[self.get_setting("ai_model", 0)]
+# Написан @lisurgut & twplu.t.me
+            temp = float(self.get_setting("ai_temperature", "0.8"))
+# Написан @lisurgut & twplu.t.me
+            ai_prompt = f"Generate a color palette for '{prompt}'. Provide exactly {color_count} HEX color codes, comma-separated, and nothing else. Example: #RRGGBB, #RRGGBB"
+# Написан @lisurgut & twplu.t.me
+            payload = {"model": ai_model, "messages": [{"role": "user", "content": ai_prompt}], "temperature": temp}
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            response = requests.post(API_URL, json=payload, timeout=45)
+# Написан @lisurgut & twplu.t.me
+            response.raise_for_status()
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            content = response.json()['choices'][0]['message']['content']
+# Написан @lisurgut & twplu.t.me
+            hex_codes = [f"#{code.upper()}" for code in re.findall(r'#([A-Fa-f0-9]{6})', content)]
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            return hex_codes
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка API при получении HEX-кодов от AI: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+        return []
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _has_photo(self, message_obj: MessageObject) -> bool:
+# Написан @lisurgut & twplu.t.me
+        if not message_obj or not message_obj.messageOwner: return False
+# Написан @lisurgut & twplu.t.me
+        media_pb = message_obj.messageOwner.media
+# Написан @lisurgut & twplu.t.me
+        return isinstance(media_pb, TLRPC.TL_messageMediaPhoto) and media_pb.photo is not None
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _download_photo_sync(self, message_obj: MessageObject) -> str:
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            photo = message_obj.messageOwner.media.photo
+# Написан @lisurgut & twplu.t.me
+            sizes = list(photo.sizes.toArray())
+# Написан @lisurgut & twplu.t.me
+            largest = max(sizes, key=lambda s: getattr(s, 'w', 0) * getattr(s, 'h', 0))
+# Написан @lisurgut & twplu.t.me
+            loader = FileLoader.getInstance(UserConfig.selectedAccount)
+# Написан @lisurgut & twplu.t.me
+            path_obj = loader.getPathToAttach(largest, True)
+# Написан @lisurgut & twplu.t.me
+            if path_obj.exists() and path_obj.length() > 0: return path_obj.getAbsolutePath()
+# Написан @lisurgut & twplu.t.me
+            loc = ImageLocation.getForPhoto(largest, photo)
+# Написан @lisurgut & twplu.t.me
+            loader.loadFile(loc, message_obj, "jpg", FileLoader.PRIORITY_HIGH, 1)
+# Написан @lisurgut & twplu.t.me
+            for _ in range(20):
+# Написан @lisurgut & twplu.t.me
+                if path_obj.exists() and path_obj.length() > 0: return path_obj.getAbsolutePath()
+# Написан @lisurgut & twplu.t.me
+                time.sleep(1)
+# Написан @lisurgut & twplu.t.me
+            return ""
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка загрузки фото: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+            return ""
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _extract_colors_from_image(self, image_path: str, count: int, method_idx: int) -> list:
+# Написан @lisurgut & twplu.t.me
+        methods = [Image.MAXCOVERAGE, Image.MEDIANCUT, Image.FASTOCTREE]
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            with Image.open(image_path) as img_pb:
+# Написан @lisurgut & twplu.t.me
+                thumb = img_pb.convert("RGB").resize((150, 150), Image.Resampling.BILINEAR)
+# Написан @lisurgut & twplu.t.me
+                quantized = thumb.quantize(colors=count, method=methods[method_idx])
+# Написан @lisurgut & twplu.t.me
+                palette = quantized.getpalette()[:count * 3]
+# Написан @lisurgut & twplu.t.me
+                return [f"#{palette[i]:02x}{palette[i+1]:02x}{palette[i+2]:02x}".upper() for i in range(0, len(palette), 3)]
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка извлечения цветов: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+            return []
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+    def _get_color_names(self, hex_codes: list) -> list:
+# Написан @lisurgut & twplu.t.me
+        names = []
+# Написан @lisurgut & twplu.t.me
+        if not self.get_setting("add_color_names", False):
+# Написан @lisurgut & twplu.t.me
+            return [""] * len(hex_codes)
+# Написан @lisurgut & twplu.t.me
+        
+# Написан @lisurgut & twplu.t.me
+        for code in hex_codes:
+# Написан @lisurgut & twplu.t.me
+            try:
+# Написан @lisurgut & twplu.t.me
+                hex_clean = code.lstrip('#')
+# Написан @lisurgut & twplu.t.me
+                response = requests.get(f"https://www.thecolorapi.com/id?hex={hex_clean}", timeout=5)
+# Написан @lisurgut & twplu.t.me
+                if response.status_code == 200:
+# Написан @lisurgut & twplu.t.me
+                    names.append(response.json()['name']['value'])
+# Написан @lisurgut & twplu.t.me
+                else:
+# Написан @lisurgut & twplu.t.me
+                    names.append("Unknown")
+# Написан @lisurgut & twplu.t.me
+            except Exception:
+# Написан @lisurgut & twplu.t.me
+                names.append("Unknown")
+# Написан @lisurgut & twplu.t.me
+        return names
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _send_results(self, params: Any, image_path: str, hex_codes: list, title: str, start_time: float):
+# Написан @lisurgut & twplu.t.me
+        try:
+# Написан @lisurgut & twplu.t.me
+            color_names = self._get_color_names(hex_codes)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            send_mode = self.get_setting("send_mode", 1)
+# Написан @lisurgut & twplu.t.me
+            separator_idx = self.get_setting("code_separator", 6)
+# Написан @lisurgut & twplu.t.me
+            separator = self.separators[separator_idx]
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            code_template = self.get_setting("code_line_template", "{code}")
+# Написан @lisurgut & twplu.t.me
+            formatted_codes = [code_template.format(code=self._format_code(code), name=name) for code, name in zip(hex_codes, color_names)]
+# Написан @lisurgut & twplu.t.me
+            codes_string = separator.join(formatted_codes)
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            footer = self.get_setting("custom_footer_text", "")
+# Написан @lisurgut & twplu.t.me
+            final_text = f"{title}\n\n{codes_string}"
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            if self.get_setting("show_processing_time", False):
+# Написан @lisurgut & twplu.t.me
+                processing_time = time.time() - start_time
+# Написан @lisurgut & twplu.t.me
+                footer += f"\n\n_Сгенерировано за {processing_time:.2f} сек._"
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            if footer.strip(): final_text += f"\n\n{footer.strip()}"
+# Написан @lisurgut & twplu.t.me
+            
+# Написан @lisurgut & twplu.t.me
+            parsed_text = parse_markdown(final_text)
+# Написан @lisurgut & twplu.t.me
+            entities = [entity.to_tlrpc_object() for entity in parsed_text.entities]
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+            if send_mode == 2:
+# Написан @lisurgut & twplu.t.me
+                SendMessagesHelper.prepareSendingDocument(UserConfig.selectedAccount, image_path, image_path, None, None, "image/png", params.peer, params.replyToMsg, params.replyToTopMsg, None, None, None, True, 0, None, None, 0, False)
+# Написан @lisurgut & twplu.t.me
+                time.sleep(0.2)
+# Написан @lisurgut & twplu.t.me
+                send_message({"peer": params.peer, "message": parsed_text.text, "entities": entities, "replyToMsg": params.replyToMsg})
+# Написан @lisurgut & twplu.t.me
+            else:
+# Написан @lisurgut & twplu.t.me
+                photo_sizes = get_send_messages_helper().generatePhotoSizes(image_path, None)
+# Написан @lisurgut & twplu.t.me
+                if not photo_sizes:
+# Написан @lisurgut & twplu.t.me
+                    run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось создать превью фото."))
+# Написан @lisurgut & twplu.t.me
+                    return
+# Написан @lisurgut & twplu.t.me
+                
+# Написан @lisurgut & twplu.t.me
+                if send_mode == 1:
+# Написан @lisurgut & twplu.t.me
+                    send_message({"peer": params.peer, "photo": photo_sizes, "path": image_path, "caption": parsed_text.text, "entities": entities, "replyToMsg": params.replyToMsg})
+# Написан @lisurgut & twplu.t.me
+                else:
+# Написан @lisurgut & twplu.t.me
+                    send_message({"peer": params.peer, "photo": photo_sizes, "path": image_path, "replyToMsg": params.replyToMsg})
+# Написан @lisurgut & twplu.t.me
+                    time.sleep(0.2)
+# Написан @lisurgut & twplu.t.me
+                    send_message({"peer": params.peer, "message": parsed_text.text, "entities": entities, "replyToMsg": params.replyToMsg})
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+        except Exception as e:
+# Написан @lisurgut & twplu.t.me
+            log(f"[{__id__}] Ошибка при отправке результатов: {e}\n{traceback.format_exc()}")
+# Написан @lisurgut & twplu.t.me
+        finally:
+# Написан @lisurgut & twplu.t.me
+            self._delete_file_delayed(image_path)
+# Написан @lisurgut & twplu.t.me
+
+# Написан @lisurgut & twplu.t.me
+    def _delete_file_delayed(self, path: str, delay: int = 10):
+# Написан @lisurgut & twplu.t.me
+        def action_pb():
+# Написан @lisurgut & twplu.t.me
+            try:
+# Написан @lisurgut & twplu.t.me
+                time.sleep(delay)
+# Написан @lisurgut & twplu.t.me
+                if os.path.exists(path):
+# Написан @lisurgut & twplu.t.me
+                    os.remove(path)
+# Написан @lisurgut & twplu.t.me
+            except OSError as e:
+# Написан @lisurgut & twplu.t.me
+                log(f"[{__id__}] Не удалось удалить временный файл {path}: {e}")
+# Написан @lisurgut & twplu.t.me
+        threading.Thread(target=action_pb, daemon=True).start()
+# Написан @lisurgut & twplu.t.me

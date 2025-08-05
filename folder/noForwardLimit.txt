@@ -1,0 +1,293 @@
+import traceback
+from typing import Any, Dict, Callable
+
+from hook_utils import get_private_field, set_private_field
+from ui.bulletin import BulletinHelper as _BulletinHelper
+from ui.settings import Header, Switch, Text
+from base_plugin import BasePlugin, HookStrategy, HookResult
+from android_utils import log as _log
+
+from java import jclass, static_proxy, Override, jvoid
+from java.util import ArrayList, Locale
+from java.lang import Boolean, Integer
+from org.telegram.messenger import MessageObject
+
+__name__ = "NoForwardLimit"
+__description__ = "Removes the limit of 100 forward messages (requires zwylib)"
+__icon__ = "zwyPluginsIcons/6"
+__id__ = "zwyNoForwardLimit"
+__version__ = "1.0.2"
+__author__ = "@zwylair"
+__min_version__ = "11.9.1"
+
+
+class Locales:
+    default = {
+        "zwylib_was_not_found": "ZwyLib plugin required for this plugin is not found!",
+    }
+    ru = {
+        "zwylib_was_not_found": "Требуемый плагин ZwyLib не найден!",
+    }
+    uk = {
+        "zwylib_was_not_found": "Не знайдено обов’язковий плагін ZwyLib!",
+    }
+    en = default
+
+
+def localise(key: str) -> str:
+    locale_dict = getattr(Locales, locale, Locales.default)
+    return locale_dict.get(key, key)
+
+
+def log(obj: Any = ""):
+    if debug_mode:
+        _log(f"{__name__}: " + str(obj))
+
+
+def import_zwylib(show_import_error_bulletin = True):
+    global zwylib
+
+    try:
+        import zwylib
+    except ImportError:
+        if show_import_error_bulletin:
+            BulletinHelper.show_error(localise("zwylib_was_not_found"))
+
+
+def is_zwylib_present() -> bool:
+    return zwylib is not None
+
+
+def get_selected_msgs_array_index(param):
+    message_object = param.args[0]
+    dialog_id = get_private_field(param.thisObject, "dialog_id")
+    return int(message_object.getDialogId() != dialog_id)
+
+
+def update_reply_button_visibility(chat_activity, selected_only_one_message: bool):
+    # без анимации, ибо это пиздец ебля в сракотан
+    view = jclass("android.view.View")
+    reply_button = get_private_field(chat_activity, "replyButton")
+    reply_button.setVisibility(view.VISIBLE if selected_only_one_message else view.GONE)
+
+
+def switch_debug_mode(new_value: bool):
+    global debug_mode
+    debug_mode = new_value
+
+
+class BulletinHelper(_BulletinHelper):
+    @classmethod
+    def show_info(cls, message, fragment = None):
+        super().show_info(f"{__name__}: " + message, fragment)
+
+    @classmethod
+    def show_error(cls, message, fragment = None):
+        super().show_error(f"{__name__}: " + message, fragment)
+
+
+class SelectorHook:
+    def __init__(self):
+        self.messages_array: Dict[int, MessageObject] = {}
+        self.is_processing_msg_group = False
+        self.is_last_in_group = False
+        self.handle_end_of_select_msg_group_call = False
+
+    def before_hooked_method(self, param):
+        selected_msg_obj = param.args[0]
+        tapped_outside: bool = param.args[1]
+        is_last: bool = param.args[2]
+        is_grouped = selected_msg_obj.getGroupId() != 0
+
+        if self.is_processing_msg_group:
+            self.is_last_in_group = is_last
+            log(f"[before] selected group member (msg_id={selected_msg_obj.getId()}, last={self.is_last_in_group})")
+            return
+
+        if tapped_outside and is_last and is_grouped:
+            log(f"[before] started selection of a group (with replaced array) (msg_id={selected_msg_obj.getId()})")
+            self.is_processing_msg_group = True
+
+        # replace selected messages array
+        index = get_selected_msgs_array_index(param)
+        java_msgs = get_private_field(param.thisObject, "selectedMessagesIds")
+        java_msgs[index] = param.thisObject.SparseArrayWithTouch()
+        set_private_field(param.thisObject, "selectedMessagesIds", java_msgs)
+
+    def after_hooked_method(self, param):
+        if self.handle_end_of_select_msg_group_call:
+            self.handle_end_of_select_msg_group_call = False
+            return
+
+        if self.is_processing_msg_group:
+            if not self.is_last_in_group:
+                return
+
+            log("[after] ended selection of group")
+
+            self.is_processing_msg_group = False
+            self.is_last_in_group = False
+            self.handle_end_of_select_msg_group_call = True
+
+        selected_msg_obj = param.args[0]
+        tapped_outside: bool = param.args[1]
+        is_last: bool = param.args[2]
+
+        index = get_selected_msgs_array_index(param)
+        selected_msgs_arrays = get_private_field(param.thisObject, "selectedMessagesIds")
+        selected_msgs_array = selected_msgs_arrays[index]
+        selected_msg_id = selected_msg_obj.getId()
+
+        log(f"[after] message_id={selected_msg_id}, tapped_outside={tapped_outside}, is_last={is_last}")
+
+        # add/remove new messages to/from local db
+        for index in reversed(range(selected_msgs_array.size())):
+            message_id = selected_msgs_array.keyAt(index)
+            message_object = selected_msgs_array.get(message_id)
+
+            if message_id in self.messages_array.keys():
+                log(f"[after] unselecting message id: {message_id}")
+                self.messages_array.pop(message_id)
+            else:
+                log(f"[after] selecting message id: {message_id}")
+                self.messages_array[message_id] = message_object
+
+        # сортируем только для того, чтобы в лог выводился по порядку также как жавовский эррей
+        if debug_mode:
+            self.messages_array = dict(sorted(self.messages_array.items()))
+
+        # restore selected messages
+        selected_msgs_array.clear()
+        for k, v in self.messages_array.items():
+            selected_msgs_array.put(k, v)
+
+        # handle no messages selected case
+        if len(self.messages_array) == 0:
+            clazz = param.thisObject.getClass()
+
+            hide_action_mode_method = clazz.getDeclaredMethod("hideActionMode")
+            hide_action_mode_method.setAccessible(True)
+            hide_action_mode_method.invoke(param.thisObject)
+
+            update_pinned_msg_view_method = clazz.getDeclaredMethod("updatePinnedMessageView", Boolean.TYPE)
+            update_pinned_msg_view_method.setAccessible(True)
+            update_pinned_msg_view_method.invoke(param.thisObject, [True])
+
+        log(f"[after] local db: {self.messages_array}")
+        log(f"[after] java db: {selected_msgs_array}")
+
+        single_selection = len(self.messages_array) == 1
+        log(f"[after] is single selection?: {single_selection}")
+
+        for _ in range(3):
+            log("[after] \n")
+
+        # set full selected messages array
+        set_private_field(param.thisObject, "selectedMessagesIds", selected_msgs_arrays)
+        update_reply_button_visibility(param.thisObject, single_selection)
+
+    def clear_messages_storage(self):
+        self.messages_array.clear()
+
+
+class ClearSelectionHook:
+    def before_hooked_method(self, param):
+        selector_hook.clear_messages_storage()
+
+
+class MultiSelectorHook:
+    def __init__(self, hook_method: Callable):
+        self.hook_method = hook_method
+
+    class BypassLimitReachedHook:
+        def replace_hooked_method(self, _param):
+            return False
+
+    def after_hooked_method(self, param):
+        chat_list_view = get_private_field(param.thisObject, "chatListView")
+        selection_listener = get_private_field(chat_list_view, "multiSelectionListener")
+        method = selection_listener.getClass().getMethod("limitReached")
+        self.hook_method(method, self.BypassLimitReachedHook())
+
+
+AUTOUPDATE_CHANNEL_ID = 2521243181
+AUTOUPDATE_CHANNEL_USERNAME = "zwyPlugins"
+AUTOUPDATE_MESSAGE_ID = 53
+
+DEFAULT_DEBUG_MODE = False
+
+locale = Locale.getDefault().getLanguage()
+selector_hook = SelectorHook()
+debug_mode = bool(DEFAULT_DEBUG_MODE)
+zwylib: Any = None
+
+
+class NoForwardLimit(BasePlugin):
+    def on_plugin_load(self):
+        global debug_mode
+        debug_mode = self.get_setting("debug_mode", DEFAULT_DEBUG_MODE)
+
+        self.add_hook("TL_messages_forwardMessages")
+        self.add_on_send_message_hook()
+
+        clazz = jclass("org.telegram.ui.ChatActivity").getClass()
+
+        selector_method = clazz.getDeclaredMethod("addToSelectedMessages", MessageObject, Boolean.TYPE, Boolean.TYPE)
+        selector_method.setAccessible(True)
+        self.hook_method(selector_method, selector_hook)
+
+        clear_selection_method = clazz.getDeclaredMethod("hideActionMode")
+        clear_selection_method.setAccessible(True)
+        self.hook_method(clear_selection_method, ClearSelectionHook())
+
+        multi_selector_method = clazz.getDeclaredMethod("startMultiselect", Integer.TYPE)
+        multi_selector_method.setAccessible(True)
+        self.hook_method(multi_selector_method, MultiSelectorHook(self.hook_method))
+
+        import_zwylib()
+        if is_zwylib_present():
+            zwylib.add_autoupdater_task(__id__, AUTOUPDATE_CHANNEL_ID, AUTOUPDATE_CHANNEL_USERNAME, AUTOUPDATE_MESSAGE_ID)
+
+        log("Loaded")
+
+    def on_plugin_unload(self):
+        if is_zwylib_present():
+            zwylib.remove_autoupdater_task(__id__)
+        log("Unloaded")
+
+    def create_settings(self):
+        try:
+            return [
+                Header(text="Settings"),
+                Switch(
+                    key="debug_mode",
+                    text="Debug mode",
+                    subtext="Prints some logs to logcat",
+                    icon="msg_log",
+                    default=DEFAULT_DEBUG_MODE,
+                    on_change=switch_debug_mode,
+                ),
+            ]
+        except Exception:
+            text = (
+                f"An exception occurred on {self.__class__.__name__}.create_settings():\n"
+                f"{traceback.format_exc().rstrip()}"
+            )
+            log(text)
+            return [Text(text)]
+
+    def pre_request_hook(self, req_name, account, req):
+        # if req_name != "TL_messages_forwardMessages":
+        #     return HookResult()
+        selector_hook.clear_messages_storage()
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        if not debug_mode or getattr(params, "message", "") != ".":
+            return HookResult()
+
+        for _ in range(60):
+            log("\n")
+
+        BulletinHelper.show_info("This text is used by debug mode. Switch the mode off in plugin prefs.")
+        selector_hook.clear_messages_storage()
+        return HookResult(strategy=HookStrategy.CANCEL)

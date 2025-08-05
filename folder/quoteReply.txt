@@ -1,0 +1,178 @@
+import traceback
+from typing import Optional, Any
+
+from android_utils import log as _log
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.bulletin import BulletinHelper
+from ui.settings import Header, Switch
+
+from java import jint
+from java.util import Locale
+from java.lang import Integer
+from org.telegram.ui import ChatActivity
+from org.telegram.messenger import R, ChatObject
+from com.exteragram.messenger.icons import BaseIconSet
+
+__name__ = "QuoteReply"
+__description__ = "Send reply as a quote with the text of the message (requires zwylib)"
+__icon__ = "zwyPluginsIcons/3"
+__version__ = "1.0.5"
+__id__ = "quoteReply"
+__author__ = "@zwylair"
+__min_version__ = "11.9.1"
+
+
+class RemoveQuoteIconHook:
+    def __init__(self):
+        super().__init__()
+        self.empty_drawable = jint(R.drawable.field_carret_empty)
+
+    def before_hooked_method(self, param):
+        if param.args[0] == R.drawable.mini_quote:
+            param.args[0] = self.empty_drawable
+
+
+class Locales:
+    default = {
+        "zwylib_was_not_found": "ZwyLib plugin required for this plugin is not found!",
+        "settings_header": "Settings",
+        "settings_hide_quote_icon_header": "Hide quote icon",
+        "settings_hide_quote_icon_hint": "Near the author's username",
+        "settings_disable_quote_in_discussion_header": "Disable quote in discussion",
+        "settings_disable_quote_in_discussion_hint": "Send reply as usual in channel comments",
+        "exception_message": "An exception occurred in plugin",
+    }
+    ru = {
+        "zwylib_was_not_found": "Требуемый плагин ZwyLib не найден!",
+        "settings_header": "Настройки",
+        "settings_hide_quote_icon_header": "Скрыть иконку цитаты",
+        "settings_hide_quote_icon_hint": "Около имени автора",
+        "settings_disable_quote_in_discussion_header": "Откл. цитату в комментариях",
+        "settings_disable_quote_in_discussion_hint": "Отправлять ответ в комментариях к постам как обычно",
+        "exception_message": "Возникла ошибка в плагине",
+    }
+    uk = {
+        "zwylib_was_not_found": "Не знайдено обов’язковий плагін ZwyLib!",
+        "settings_header": "Налаштування",
+        "settings_hide_quote_icon_header": "Сховати іконку цитати",
+        "settings_hide_quote_icon_hint": "Біля імені автора",
+        "settings_disable_quote_in_discussion_header": "Вимк. цитату в коментарях",
+        "settings_disable_quote_in_discussion_hint": "Відправляти відповідь в коментарях як звичайно",
+        "exception_message": "Виникла помилка в плагині",
+    }
+    en = default
+
+
+def localise(key: str) -> str:
+    locale = Locale.getDefault().getLanguage()
+    locale_dict = getattr(Locales, locale, Locales.default)
+    return locale_dict.get(key, key)
+
+
+def import_zwylib(show_import_error_bulletin = True):
+    global zwylib
+
+    try:
+        import zwylib
+    except ImportError:
+        if show_import_error_bulletin:
+            BulletinHelper.show_error(localise("zwylib_was_not_found"))
+
+
+def is_zwylib_present() -> bool:
+    return zwylib is not None
+
+
+def log(string: str):
+    _log(f"{__name__}: " + string)
+
+
+AUTOUPDATE_CHANNEL_ID = 2521243181
+AUTOUPDATE_CHANNEL_USERNAME = "zwyPlugins"
+AUTOUPDATE_MESSAGE_ID = 31
+
+DEFAULT_HIDE_QUOTE_ICON = False
+DEFAULT_DISABLE_IN_DISCUSSION = False
+
+zwylib: Any = None
+
+
+class QuoteReply(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.remove_quote_hook = None
+
+    def create_settings(self):
+        return [
+            Header(text=localise("settings_header")),
+            Switch(
+                key="hide_quote_icon",
+                text=localise("settings_hide_quote_icon_header"),
+                subtext=localise("settings_hide_quote_icon_hint"),
+                default=DEFAULT_HIDE_QUOTE_ICON,
+                icon="msg_report_personal",
+                on_change=lambda status: self._hook_if_needed(status) if status else self._unhook()
+            ),
+            Switch(
+                key="disable_in_discussion",
+                text=localise("settings_disable_quote_in_discussion_header"),
+                subtext=localise("settings_disable_quote_in_discussion_hint"),
+                default=DEFAULT_DISABLE_IN_DISCUSSION,
+                icon="msg_discuss",
+            ),
+        ]
+
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self._hook_if_needed()
+
+        import_zwylib()
+        if is_zwylib_present():
+            zwylib.add_autoupdater_task(__id__, AUTOUPDATE_CHANNEL_ID, AUTOUPDATE_CHANNEL_USERNAME, AUTOUPDATE_MESSAGE_ID)
+
+        log("Loaded")
+
+    def on_plugin_unload(self):
+        self._unhook()
+
+        if is_zwylib_present():
+            zwylib.remove_autoupdater_task(__id__)
+
+        log("Unloaded")
+
+    def on_send_message_hook(self, account, params):
+        try:
+            disable_in_discussion = self.get_setting("disable_in_discussion", DEFAULT_DISABLE_IN_DISCUSSION)
+
+            if (
+                    params.replyToMsg is None
+                    or params.replyQuote is not None
+                    or (disable_in_discussion and ChatObject.isDiscussionGroup(account, -params.peer))
+            ):
+                return HookResult()
+
+            reply_quote_from_method = getattr(ChatActivity.ReplyQuote, "from")
+            params.replyQuote = reply_quote_from_method(params.replyToMsg)
+            return HookResult(strategy=HookStrategy.MODIFY, params=params)
+        except Exception:
+            params.message = f"{localise('exception_message')} {__name__}:\n\n{traceback.format_exc()}"
+            return HookResult(strategy=HookStrategy.MODIFY_FINAL, params=params)
+
+    # noinspection PyTypeChecker
+    def _hook_if_needed(self, hide_quote_icon: Optional[bool] = None):
+        if self.remove_quote_hook is not None:
+            return
+
+        if hide_quote_icon is None:
+            hide_quote_icon = self.get_setting("hide_quote_icon", DEFAULT_HIDE_QUOTE_ICON)
+
+        if hide_quote_icon:
+            self.remove_quote_hook = self.hook_method(
+                BaseIconSet.getClass().getDeclaredMethod("getIcon", Integer),
+                RemoveQuoteIconHook()
+            )
+
+    def _unhook(self):
+        if self.remove_quote_hook is not None:
+            self.unhook_method(self.remove_quote_hook)
+            self.remove_quote_hook = None

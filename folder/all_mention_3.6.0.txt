@@ -1,0 +1,342 @@
+__id__ = "all_mention"
+__name__ = "all mention"
+__author__ = "@pluginsnerex"
+__version__ = "3.6.0"
+__description__ = """Плагин для удобного и гибкого упоминания пользователей. Прост в использовании, легко настраивается, перед использованием зайдите в настройки и настройте под себя."""
+
+# -*- coding: utf-8 -*-
+# сгенерировано в Plugin IDE - @PluginIDE
+
+__icon__ = "IslomjonAnimeEmoji/53"
+__min_version__ = "11.12.0"
+
+import threading
+import time
+import traceback
+import re
+import random
+from typing import Any, Set, Dict, Optional, List
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from client_utils import send_message, send_request, get_messages_controller, get_user_config
+from ui.settings import Header, Selector, Switch, Input, Divider
+from ui.bulletin import BulletinHelper
+from org.telegram.tgnet import TLRPC
+from org.telegram.messenger import UserObject
+
+class AllMentionUltimaPlugin(BasePlugin):
+    def on_plugin_load(self):
+        """Вызывается при загрузке плагина."""
+        self.add_on_send_message_hook()
+        # Словарь для хранения событий остановки для каждого чата. >_o
+        self._stop_events: Dict[int, threading.Event] = {}
+        self.log(f"[{__name__}] плагин загружен и готов к работе.")
+
+    def on_plugin_unload(self):
+        """Вызывается при выгрузке плагина."""
+        # Останавливаем все активные задачи при выгрузке
+        for event in self._stop_events.values():
+            event.set()
+        self._stop_events.clear()
+        self.log(f"[{__name__}] плагин выгружен.")
+
+    def create_settings(self):
+        """Создает интерфейс настроек плагина."""
+        all_cmd = self.get_setting("all_command", ".all")
+        admins_cmd = self.get_setting("admins_command", ".all admins")
+        random_cmd = self.get_setting("random_command", ".all random")
+        silent_cmd = self.get_setting("silent_command", ".all night")
+        online_cmd = self.get_setting("online_command", ".all online")
+        offline_cmd = self.get_setting("offline_command", ".all offline")
+        stop_cmd = self.get_setting("all_stop_command", ".all stop")
+
+        help_text_pi = (
+            "Как использовать:\n"
+            "<команда> [текст] [число-лимит]\n\n"
+            "Примеры команд (можно изменить выше):\n\n"
+            f"• `{all_cmd}` - упомянуть всех\n"
+            f"• `{admins_cmd}` - упомянуть админов\n"
+            f"• `{random_cmd} 5` - упомянуть 5 случайных\n"
+            f"• `{online_cmd}` - упомянуть тех, кто онлайн\n"
+            f"• `{offline_cmd}` - упомянуть тех, кто оффлайн\n"
+            f"• `{silent_cmd}` - упомянуть всех без @ (тихо)\n"
+            f"• `{stop_cmd}` - остановить текущее упоминание\n\n"
+            "Текст и лимит можно добавлять к любой команде."
+        )
+        
+        return [
+            Header("Основные настройки"),
+            Input(key="all_command", text="Команда для всех", default=".all", icon="msg_edit"),
+            Input(key="admins_command", text="Команда для админов", default=".all admins", icon="msg_admins"),
+            Input(key="random_command", text="Команда для случайных", default=".all random", icon="msg_rate_up"),
+            Input(key="online_command", text="Команда для онлайн", default=".all online", icon="msg_online"),
+            Input(key="offline_command", text="Команда для оффлайн", default=".all offline", icon="msg_contacts_time"),
+            Input(key="silent_command", text="Команда для тихих", default=".all night", icon="msg_bell_mute"),
+            Input(key="all_stop_command", text="Команда для остановки", default=".all stop", icon="msg_pollstop"),
+            Divider(),
+            Header("Общие параметры"),
+            Input(key="default_header", text="Заголовок по умолчанию", default="🔔 Общий сбор!", icon="msg_topic_create"),
+            Selector(key="send_mode", text="Режим отправки", items=["Частями (рекомендуется)", "Одним сообщением"], default=0, icon="msg_share"),
+            Input(key="message_delay", text="Задержка между частями (сек)", default="1.5", icon="msg_recent"),
+            Divider(),
+            Header("Стиль и фильтры"),
+            Selector(key="silent_name_style", text="Стиль 'тихих' упоминаний", items=["По имени и фамилии", "Только по имени", "Как в контактах"], default=0, icon="msg_contacts"),
+            Switch(key="mention_no_username", text="Упоминать без @username", subtext="Ссылка на профиль, если юзернейм скрыт", default=True, icon="msg_filled_menu_users"),
+            Switch(key="include_bots", text="Упоминать ботов", default=False, icon="input_bot1"),
+            Divider(text=help_text_pi)
+        ]
+
+    def _parse_command_pi(self, command_body: str) -> Dict[str, Any]:
+        """Парсит аргументы команды: лимит и текст."""
+        parts = command_body.split()
+        limit = None
+        
+        if not parts:
+            return {"limit": None, "header": ""}
+            
+        if parts and parts[-1].isdigit():
+            limit = int(parts.pop(-1))
+
+        header = ' '.join(parts).strip()
+        
+        return {"limit": limit, "header": header}
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        if not hasattr(params, 'message') or not isinstance(params.message, str):
+            return HookResult()
+
+        msg = params.message.strip()
+        
+        # Сначала проверяем команду остановки
+        stop_command = self.get_setting("all_stop_command", ".all stop").strip()
+        if msg.lower() == stop_command:
+            stop_event = self._stop_events.get(params.peer)
+            if stop_event:
+                stop_event.set() # Посылаем сигнал на остановку
+                # Не удаляем событие здесь, оно удалится само при завершении потока
+                BulletinHelper.show_success("Остановка упоминания...")
+            else:
+                BulletinHelper.show_info("Нет активных упоминаний в этом чате.")
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        # Карта остальных команд
+        commands_map = {
+            self.get_setting("admins_command", ".all admins").strip(): 'a',
+            self.get_setting("random_command", ".all random").strip(): 'r',
+            self.get_setting("online_command", ".all online").strip(): 'o',
+            self.get_setting("offline_command", ".all offline").strip(): 'f',
+            self.get_setting("silent_command", ".all night").strip(): 's',
+            self.get_setting("all_command", ".all").strip(): None,
+        }
+        
+        filters = set()
+        command_body = ""
+        matched = False
+
+        # Сортируем команды от самой длинной к самой короткой, чтобы избежать ложных срабатываний
+        for cmd_prefix, filter_char in sorted(commands_map.items(), key=lambda item: len(item[0]), reverse=True):
+            if msg.lower().startswith(cmd_prefix):
+                if filter_char:
+                    filters.add(filter_char)
+                command_body = msg[len(cmd_prefix):].strip()
+                matched = True
+                break
+
+        if not matched:
+            return HookResult()
+            
+        # Если уже есть активная задача в этом чате, не запускаем новую
+        if params.peer in self._stop_events:
+            BulletinHelper.show_error("Упоминание уже запущено в этом чате.")
+            return HookResult(strategy=HookStrategy.CANCEL)
+            
+        parsed_args = self._parse_command_pi(command_body)
+        parsed_args['filters'] = filters
+
+        header_pi = parsed_args['header']
+        if not header_pi or not re.search(r'\S', header_pi):
+            header_pi = self.get_setting("default_header", "🔔 Общий сбор!")
+
+        send_mode_idx = self.get_setting("send_mode", 0)
+        send_mode = "multi" if send_mode_idx == 0 else "one"
+        mention_noname = self.get_setting("mention_no_username", True)
+        include_bots = self.get_setting("include_bots", False)
+        try:
+            delay = float(self.get_setting("message_delay", "1.5"))
+        except ValueError:
+            delay = 1.5
+
+        # Создаем и сохраняем новое событие для остановки
+        stop_event = threading.Event()
+        self._stop_events[params.peer] = stop_event
+
+        thread = threading.Thread(
+            target=self.process_all_command, 
+            args=(params.peer, parsed_args, header_pi, send_mode, mention_noname, include_bots, delay, stop_event),
+            daemon=True
+        )
+        thread.start()
+
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    def process_all_command(self, peer_id: int, parsed_args: Dict, header: str, send_mode: str, mention_noname: bool, include_bots: bool, delay: float, stop_event: threading.Event):
+        """Собирает участников чата и инициирует отправку упоминаний."""
+        try:
+            if stop_event.is_set(): return
+            BulletinHelper.show_info("Начинаю сбор участников...")
+            controller = get_messages_controller()
+            chat = controller.getChat(-peer_id)
+
+            if not chat:
+                BulletinHelper.show_error("Ошибка: Чат не найден.")
+                return
+
+            input_channel = controller.getInputChannel(chat)
+            if not input_channel:
+                BulletinHelper.show_error("Ошибка: Работает только в супергруппах.")
+                return
+
+            all_users = {}
+            all_participants = []
+
+            def on_response(response, error):
+                nonlocal all_users, all_participants
+                if stop_event.is_set(): return
+                if error:
+                    BulletinHelper.show_error(f"Ошибка API: {error.text}")
+                    return
+
+                all_users.update({user.id: user for user in response.users.toArray()})
+                participants_from_response = list(response.participants.toArray())
+                all_participants.extend(participants_from_response)
+
+                # Продолжаем запрашивать, пока не получим всех участников
+                if len(participants_from_response) == 200:
+                    req.offset += 200
+                    send_request(req, on_response)
+                else:
+                    self.send_mentions(peer_id, all_users, all_participants, parsed_args, header, send_mode, mention_noname, include_bots, delay, stop_event)
+
+            req = TLRPC.TL_channels_getParticipants()
+            req.channel = input_channel
+            req.filter = TLRPC.TL_channelParticipantsRecent()
+            req.offset = 0
+            req.limit = 200
+            req.hash = 0
+            send_request(req, on_response)
+
+        except Exception as e:
+            self.log(f"Ошибка в process_all_command: {traceback.format_exc()}")
+            BulletinHelper.show_error(f"Критическая ошибка: {e}")
+            # В случае ошибки, также удаляем событие
+            if peer_id in self._stop_events:
+                del self._stop_events[peer_id]
+
+    def is_user_online(self, user: TLRPC.User) -> bool:
+        """Проверяет, онлайн ли пользователь."""
+        if not hasattr(user, 'status') or user.status is None:
+            return False
+        return user.status.__class__.__name__ in ("TL_userStatusOnline", "TL_userStatusRecently")
+
+    def send_mentions(self, peer_id, users, participants, parsed_args, header, send_mode, mention_noname, include_bots, delay, stop_event):
+        """Фильтрует участников, отправляет упоминания и очищает событие."""
+        try:
+            if stop_event.is_set(): return
+            
+            filters = parsed_args.get('filters', set())
+            limit = parsed_args.get('limit')
+            my_id = get_user_config().getClientUserId()
+            eligible_users: List[TLRPC.User] = []
+
+            for p in participants:
+                if stop_event.is_set(): break
+                try:
+                    user_id = p.peer.user_id
+                    user = users.get(user_id)
+                    if not user or user.id == my_id or user.deleted: continue
+                    if user.bot and not include_bots: continue
+                    
+                    is_admin = isinstance(p, (TLRPC.TL_channelParticipantAdmin, TLRPC.TL_channelParticipantCreator))
+                    if 'a' in filters and not is_admin: continue
+                    
+                    is_online = self.is_user_online(user)
+                    if 'o' in filters and not is_online: continue
+                    if 'f' in filters and is_online: continue
+                    
+                    eligible_users.append(user)
+                except Exception:
+                    continue
+
+            if stop_event.is_set() or not eligible_users:
+                if not stop_event.is_set():
+                    BulletinHelper.show_info("Не найдено подходящих участников для упоминания.")
+                return
+
+            users_to_mention = eligible_users
+            if 'r' in filters:
+                random.shuffle(users_to_mention)
+            if limit is not None:
+                users_to_mention = users_to_mention[:limit]
+
+            BulletinHelper.show_success(f"Начинаю упоминание {len(users_to_mention)} участников...")
+
+            mentions = []
+            silent_name_style = self.get_setting("silent_name_style", 0)
+
+            for user in users_to_mention:
+                mention_text = None
+                if 's' in filters:
+                    if silent_name_style == 0:
+                        display_name = user.first_name or ""
+                        if user.last_name:
+                            display_name += f" {user.last_name}"
+                        mention_text = display_name.strip() or "пользователь"
+                    elif silent_name_style == 1:
+                        mention_text = user.first_name or "пользователь"
+                    elif silent_name_style == 2:
+                        mention_text = UserObject.getDisplayName(user) or "пользователь"
+                elif user.username:
+                    mention_text = f"@{user.username}"
+                elif mention_noname:
+                    display_name = UserObject.getDisplayName(user) or "пользователь"
+                    mention_text = f"[{display_name}](tg://user?id={user.id})"
+                
+                if mention_text:
+                    mentions.append(mention_text)
+
+            if stop_event.is_set() or not mentions:
+                if not stop_event.is_set():
+                    BulletinHelper.show_info("Нет упоминаний для отправки после фильтрации.")
+                return
+
+            if send_mode == "one":
+                full_message_pi = header + "\n\n" + " ".join(mentions)
+                if len(full_message_pi.encode('utf-16-le')) // 2 > 4096:
+                    BulletinHelper.show_error("Слишком много упоминаний. Используйте режим 'Частями'.")
+                elif not stop_event.is_set():
+                    send_message({"peer": peer_id, "message": full_message_pi})
+            else:
+                if not stop_event.is_set():
+                    send_message({"peer": peer_id, "message": header})
+                    time.sleep(delay)
+                
+                chunk = ""
+                for m in mentions:
+                    if stop_event.is_set(): break
+                    if len((chunk + m + " ").encode('utf-16-le')) // 2 > 4096:
+                        send_message({"peer": peer_id, "message": chunk.strip()})
+                        time.sleep(delay)
+                        chunk = m + " "
+                    else:
+                        chunk += m + " "
+                
+                if chunk.strip() and not stop_event.is_set():
+                    send_message({"peer": peer_id, "message": chunk.strip()})
+
+            if not stop_event.is_set():
+                BulletinHelper.show_success("Упоминание завершено!")
+
+        finally:
+            # Гарантированно удаляем событие из словаря после завершения или остановки
+            if peer_id in self._stop_events:
+                del self._stop_events[peer_id]
