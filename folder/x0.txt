@@ -1,0 +1,142 @@
+import os
+import time
+import requests
+import traceback
+import threading
+from typing import Optional
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from android_utils import run_on_ui_thread, log
+from client_utils import send_message, get_last_fragment
+from ui.bulletin import BulletinHelper
+
+from org.telegram.messenger import FileLoader, MessageObject, UserConfig
+from org.telegram.tgnet import TLRPC
+
+__id__ = "2763637"
+__name__ = "Simple photo link"
+__description__ = "Загружает медиафайл (фото, видео, гиф, документ) на хостинг x0.at и отправляет полученную ссылку в чат. Для использования, ответьте на сообщение с медиафайлом командой .x0"
+__author__ = "@shrdevv"
+__version__ = "1.0.0"
+__min_version__ = "11.12.0"
+__icon__ = "plugin232/12"
+
+class X0UploaderPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._is_processing = False
+
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+
+    def on_send_message_hook(self, account, params):
+        if not hasattr(params, 'message') or not isinstance(params.message, str):
+            return HookResult()
+        
+        if params.message.strip().lower() != ".x0":
+            return HookResult()
+
+        if self._is_processing:
+            run_on_ui_thread(lambda: BulletinHelper.show_error("Уже идет загрузка другого файла."))
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        if not hasattr(params, "replyToMsg") or not params.replyToMsg:
+            run_on_ui_thread(lambda: BulletinHelper.show_error("Ответьте на сообщение с медиафайлом."))
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        message_obj = params.replyToMsg
+        if not self._has_media(message_obj):
+            run_on_ui_thread(lambda: BulletinHelper.show_error("В сообщении нет поддерживаемого медиафайла."))
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        run_on_ui_thread(lambda: BulletinHelper.show_info("Загрузка на x0.at..."))
+        
+        thread = threading.Thread(target=self._process_upload, args=(message_obj, params.peer), daemon=True)
+        thread.start()
+
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    def _has_media(self, message_obj: MessageObject) -> bool:
+        return (message_obj.isPhoto() or message_obj.isVideo() or 
+                message_obj.isGif() or message_obj.isDocument() or 
+                message_obj.isVoice() or message_obj.isRoundVideo())
+
+    def _process_upload(self, message_obj: MessageObject, peer_id: int):
+        self._is_processing = True
+        try:
+            file_path = self._get_media_path_blocking(message_obj)
+
+            if not file_path:
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Не удалось загрузить файл для отправки."))
+                return
+
+            log(f"[{__id__}] Uploading file: {file_path}")
+
+            with open(file_path, 'rb') as f:
+                response = requests.post('https://x0.at', files={'file': f})
+
+            if response.status_code == 200:
+                link = response.text
+                send_message({
+                    "peer": peer_id,
+                    "message": link,
+                    "replyToMsg": message_obj,
+                })
+            else:
+                error_text = f"Ошибка загрузки: {response.status_code} {response.text}"
+                run_on_ui_thread(lambda: BulletinHelper.show_error(error_text))
+
+        except Exception as e:
+            log(f"[{__id__}] Error during upload process: {e}\n{traceback.format_exc()}")
+            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Произошла ошибка: {e}"))
+        finally:
+            self._is_processing = False
+
+    def _get_media_path_blocking(self, message_obj: MessageObject) -> Optional[str]:
+        try:
+            current_account = UserConfig.selectedAccount
+            file_loader = FileLoader.getInstance(current_account)
+            
+            path_obj = file_loader.getPathToMessage(message_obj.messageOwner)
+            if path_obj:
+                path_str = path_obj.getAbsolutePath()
+                if os.path.exists(path_str) and os.path.getsize(path_str) > 0:
+                    log(f"[{__id__}] File found in cache: {path_str}")
+                    return path_str
+            
+            log(f"[{__id__}] File not in cache, starting download...")
+            media_attach = self._get_media_attach(message_obj)
+            if not media_attach:
+                log(f"[{__id__}] Could not get media attach object.")
+                return None
+
+            file_loader.loadFile(media_attach, message_obj, "mp4", FileLoader.PRIORITY_HIGH, 1)
+
+            final_path_obj = file_loader.getPathToAttach(media_attach, True)
+            if not final_path_obj:
+                log(f"[{__id__}] Could not determine final path.")
+                return None
+            final_path_str = final_path_obj.getAbsolutePath()
+
+            timeout_seconds = 60
+            for _ in range(timeout_seconds):
+                if os.path.exists(final_path_str) and os.path.getsize(final_path_str) > 0:
+                    log(f"[{__id__}] File downloaded successfully: {final_path_str}")
+                    return final_path_str
+                time.sleep(1)
+
+            log(f"[{__id__}] File download timed out.")
+            return None
+
+        except Exception as e:
+            log(f"[{__id__}] Error in _get_media_path_blocking: {e}\n{traceback.format_exc()}")
+            return None
+
+    def _get_media_attach(self, message_obj: MessageObject):
+        if message_obj.isPhoto():
+            photo = message_obj.messageOwner.media.photo
+            if photo and photo.sizes:
+                return max(photo.sizes, key=lambda s: s.size if hasattr(s, 'size') else (s.w * s.h))
+        elif message_obj.isDocument():
+            return message_obj.getDocument()
+        return None
